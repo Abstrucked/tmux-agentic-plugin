@@ -452,6 +452,219 @@ class CliSmokeTests(unittest.TestCase):
         _, jumps = self.run_attach({"%1": "idle", "%2": "working"}, "--next")
         self.assertEqual(jumps, ["%2"])
 
+
+def wait_for(predicate, timeout=5.0):
+    """Poll predicate until it is true or timeout seconds pass."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return predicate()
+
+
+class NotifyClickTests(unittest.TestCase):
+    """A blocked transition notifies; clicking the notification focuses the
+    pane through `focus`, which switches a client and raises its window."""
+
+    PANE_FMT = ("#{pane_id}|#{pane_pid}|#{window_id}|"
+                "#{session_name}:#{window_index}.#{pane_index}|#{pane_current_path}")
+    CLIENT_FMT = "#{client_activity}|#{client_name}|#{client_pid}|#{session_name}"
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="ta-notify-"))
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.fake = self.dir / "bin"
+        self.fake.mkdir()
+        self.raised = self.dir / "raised"
+        raise_cmd = self.fake / "raise-window"
+        raise_cmd.write_text(f'#!/bin/sh\nprintf "%s" "$1" >{shlex.quote(str(self.raised))}\n')
+        raise_cmd.chmod(0o755)
+        self.log = fake_tmux(self.fake, {
+            f"list-panes -a -F {self.PANE_FMT}": "%7|999999|@1|main:1.1|/src/app\n",
+            "display-message -p -t %7 #{session_name}": "main",
+            # The client on the pane's session wins over a more active one.
+            f"list-clients -F {self.CLIENT_FMT}":
+                "300|/dev/pts/3|4242|other\n200|/dev/pts/4|4343|main\n",
+            "show-option -gqv @tmux-agent-raise-command": str(raise_cmd),
+        })
+        self.notified = self.dir / "notify-send.log"
+        (self.fake / "notify-send").write_text(
+            "#!/bin/sh\n"
+            'for a; do [ "$a" = --wait ] && [ -n "${NO_WAIT:-}" ] && exit 1; done\n'
+            f'printf "%s\\n" "$*" >>{shlex.quote(str(self.notified))}\n'
+            'sleep "${HOLD:-0}"\n'
+            'printf "%s" "${ACTION:-}"\n'
+        )
+        (self.fake / "notify-send").chmod(0o755)
+
+    def refresh(self, **env):
+        # Pane %7 was working; its agent hook just reported blocked.
+        now = int(time.time())
+        (self.dir / "stamp").write_text(f"{now}\n")
+        (self.dir / "state-%7").write_text(
+            f"working|custom|0|{now - 10}|{now}|main:1.1|@1|/src/app|1\n")
+        (self.dir / "report-%7").write_text(f"blocked|{now}\n")
+        e = {k: v for k, v in os.environ.items() if k != "TMUX_AGENT_QUIET"}
+        e.update({"TMUX_AGENT_STATE_DIR": str(self.dir),
+                  "PATH": f"{self.fake}:{os.environ['PATH']}", **env})
+        return subprocess.run([str(CLI), "refresh", "1"], capture_output=True,
+                              text=True, env=e, timeout=10)
+
+    def switches(self):
+        calls = self.log.read_text().splitlines() if self.log.exists() else []
+        return [c for c in calls if c.startswith("switch-client")]
+
+    def test_click_switches_client_and_raises_its_window(self):
+        r = self.refresh(ACTION="default")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(wait_for(lambda: self.raised.exists()), self.log.read_text())
+        self.assertEqual(self.switches(), ["switch-client -c /dev/pts/4 -t %7"])
+        self.assertEqual(self.raised.read_text(), "4343")
+        self.assertTrue((self.dir / "seen-%7").exists())
+        sent = self.notified.read_text()
+        self.assertIn("-u critical -A default=Show --wait custom needs input", sent)
+
+    def test_dismissed_notification_does_nothing(self):
+        self.refresh(ACTION="")
+        self.assertTrue(wait_for(lambda: self.notified.exists()))
+        time.sleep(0.3)
+        self.assertEqual(self.switches(), [])
+        self.assertFalse(self.raised.exists())
+
+    def test_waiting_notification_releases_the_scan_lock(self):
+        self.refresh(HOLD="5")
+        self.assertTrue(wait_for(lambda: self.notified.exists()))
+        started = time.monotonic()
+        r = self.refresh(HOLD="5")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertLess(time.monotonic() - started, 3)
+
+    def test_notify_send_without_wait_still_notifies(self):
+        self.refresh(NO_WAIT="1")
+        self.assertTrue(wait_for(lambda: self.notified.exists()))
+        self.assertEqual(self.notified.read_text().splitlines(),
+                         ["-a tmux-agent -u critical custom needs input app · main:1.1"])
+
+    def test_focus_on_a_closed_pane_does_nothing(self):
+        r = subprocess.run(
+            [str(CLI), "focus", "--pane", "%99"], capture_output=True, text=True,
+            env={**os.environ, "TMUX_AGENT_STATE_DIR": str(self.dir),
+                 "PATH": f"{self.fake}:{os.environ['PATH']}"},
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.switches(), [])
+        self.assertFalse(self.raised.exists())
+
+
+class RaiseTests(unittest.TestCase):
+    """lib/raise detects the window manager from the client's environment and
+    focuses the window owned by the client's nearest ancestor. A sleep child
+    stands in for the tmux client; this test process is its ancestor and the
+    fake WM tools report it as the window owner."""
+
+    RAISE = ROOT / "lib" / "raise"
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="ta-raise-"))
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.fake = self.dir / "bin"
+        self.fake.mkdir()
+        self.log = self.dir / "wm.log"
+        self.owner = os.getpid()
+
+    def tool(self, name, body=""):
+        path = self.fake / name
+        path.write_text(f'#!/bin/sh\nprintf "%s\\n" "{name} $*" >>{shlex.quote(str(self.log))}\n{body}')
+        path.chmod(0o755)
+
+    def raise_(self, client_env, env=None, option=""):
+        fake_tmux(self.fake, {"show-option -gqv @tmux-agent-raise-command": option})
+        # No awesome running unless a test says otherwise.
+        if not (self.fake / "pgrep").exists():
+            self.tool("pgrep", "exit 1\n")
+        path = f"{self.fake}:{os.environ['PATH']}"
+        client = subprocess.Popen(["sleep", "30"], env={"PATH": path, **client_env})
+        self.addCleanup(client.wait)
+        self.addCleanup(client.kill)
+        base = {k: v for k, v in os.environ.items()
+                if k not in ("HYPRLAND_INSTANCE_SIGNATURE", "SWAYSOCK", "DISPLAY",
+                             "WAYLAND_DISPLAY", "TMUX")}
+        r = subprocess.run([str(self.RAISE), str(client.pid)], capture_output=True,
+                           text=True, env={**base, "PATH": path, **(env or client_env)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        calls = self.log.read_text().splitlines() if self.log.exists() else []
+        # pgrep only probes for awesome; the rest are window-manager calls.
+        return client.pid, [c for c in calls if not c.startswith("pgrep ")]
+
+    def hyprctl(self):
+        self.tool("hyprctl", f"""case "$1" in
+clients) printf '[{{"pid": 1, "address": "0xdead"}}, {{"pid": {self.owner}, "address": "0xbeef"}}]' ;;
+eval) printf '%s' "${{EVAL_REPLY:-}}" ;;
+esac
+""")
+
+    def test_hyprland_lua_config_uses_eval(self):
+        self.hyprctl()
+        env = {"HYPRLAND_INSTANCE_SIGNATURE": "sig", "EVAL_REPLY": "ok"}
+        _, calls = self.raise_(env)
+        self.assertEqual(calls, [
+            "hyprctl clients -j",
+            'hyprctl eval hl.dispatch(hl.dsp.focus({ window = "address:0xbeef" }))',
+        ])
+
+    def test_hyprland_legacy_config_falls_back_to_dispatch(self):
+        self.hyprctl()
+        env = {"HYPRLAND_INSTANCE_SIGNATURE": "sig", "EVAL_REPLY": "unknown request"}
+        _, calls = self.raise_(env)
+        self.assertEqual(calls[-1], "hyprctl dispatch focuswindow address:0xbeef")
+
+    def test_sway_focuses_the_nearest_ancestor_with_a_window(self):
+        self.tool("swaymsg", f'[ "$1" = "[pid={self.owner}] focus" ] || exit 2\n')
+        client, calls = self.raise_({"SWAYSOCK": "/run/sway.sock"})
+        self.assertEqual(calls, [f"swaymsg [pid={client}] focus",
+                                 f"swaymsg [pid={self.owner}] focus"])
+
+    def test_awesome_jumps_to_the_client(self):
+        self.tool("pgrep")
+        script = self.dir / "awesome.lua"
+        self.tool("awesome-client", f'printf "%s" "$1" >{shlex.quote(str(script))}\n')
+        client, _ = self.raise_({"DISPLAY": ":9"})
+        lua = script.read_text()
+        self.assertIn(f"ipairs({{ {client},{self.owner},", lua)
+        self.assertIn("c:jump_to(false)", lua)
+
+    def test_x11_activates_the_window_with_xdotool(self):
+        self.tool("xdotool", f'[ "$1 $3" = "search {self.owner}" ] && echo 777\nexit 0\n')
+        _, calls = self.raise_({"DISPLAY": ":9"})
+        self.assertEqual(calls[-1], "xdotool windowactivate 777")
+
+    @unittest.skipUnless(Path("/proc/self/environ").exists(), "needs procfs")
+    def test_client_environment_wins_over_a_stale_server_one(self):
+        # tmux started under Hyprland, client attached from an X11 session.
+        self.hyprctl()
+        self.tool("xdotool", f'[ "$1 $3" = "search {self.owner}" ] && echo 777\nexit 0\n')
+        _, calls = self.raise_({"DISPLAY": ":9"},
+                               env={"HYPRLAND_INSTANCE_SIGNATURE": "stale"})
+        self.assertEqual(calls[-1], "xdotool windowactivate 777")
+        self.assertFalse(any(c.startswith("hyprctl") for c in calls), calls)
+
+    def test_off_raises_nothing(self):
+        self.hyprctl()
+        _, calls = self.raise_({"HYPRLAND_INSTANCE_SIGNATURE": "sig"}, option="off")
+        self.assertEqual(calls, [])
+
+    def test_custom_command_gets_the_client_pid(self):
+        self.tool("my-raise")
+        client, calls = self.raise_({"HYPRLAND_INSTANCE_SIGNATURE": "sig"},
+                                    option=str(self.fake / "my-raise"))
+        self.assertEqual(calls, [f"my-raise {client}"])
+
+    def test_unknown_desktop_does_nothing(self):
+        self.hyprctl()
+        _, calls = self.raise_({"WAYLAND_DISPLAY": "wayland-1"})
+        self.assertEqual(calls, [])
+
 class HookTests(unittest.TestCase):
     def state_of(self, event):
         r = bash('ta_hook_state "$1"', event)

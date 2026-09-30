@@ -23,7 +23,8 @@ agent CLIs running in any pane, and tracks each one's state:
 - **Jump** (`prefix + A`): straight to the next blocked agent, then to
   finished ones you have not looked at. Press again to cycle through them.
 - **Desktop notifications** when an agent you are not looking at gets
-  blocked or finishes.
+  blocked or finishes. Click one to jump to that pane, with its terminal
+  window raised on its workspace.
 - **Exact states through agent hooks** (optional): Claude Code, Codex and
   OpenCode report their own lifecycle. Without hooks, state is inferred
   from pane output and CPU use.
@@ -36,7 +37,8 @@ agent CLIs running in any pane, and tracks each one's state:
 - bash 4+ (on macOS: `brew install bash`)
 - [fzf](https://github.com/junegunn/fzf) for the picker
 - jq for `install-hooks` and `status --json`
-- Linux or macOS. Notifications use `notify-send` or `osascript`.
+- Linux or macOS. Notifications use `notify-send` or `osascript`; clicking
+  them works with `notify-send` (see [Clicking notifications](#clicking-notifications)).
 
 ## Install
 
@@ -82,6 +84,36 @@ alone. `install-hooks --remove` takes them out again.
 TPM installs to `~/.config/tmux/plugins/` instead of `~/.tmux/plugins/` when
 your config lives in `~/.config/tmux`. Adjust the paths above to match.
 
+### Clicking notifications
+
+Clicking a notification switches a tmux client to that agent's session,
+window and pane, then raises the terminal window the client runs in,
+switching to its workspace or tag. Nothing to set up on most desktops.
+
+The click needs a notification daemon that runs the default action on click
+and libnotify 0.7.9+ (`notify-send --wait`). swaync, mako, awesome, GNOME and
+KDE do out of the box. dunst closes the notification on a left click by
+default; add this to `dunstrc`:
+
+```ini
+[global]
+    mouse_left_click = do_action, close_current
+```
+
+Raising the window is detected from the tmux client's environment:
+
+| Desktop                                  | How                                                          |
+|------------------------------------------|--------------------------------------------------------------|
+| Hyprland                                 | `hyprctl` (Lua configs through `eval`, older ones `dispatch`); needs jq |
+| sway                                     | `swaymsg [pid=…] focus`                                      |
+| awesome                                  | `awesome-client`, jumping to the client's tag                |
+| other X11 window managers (i3, bspwm, xfwm, KDE/GNOME on X11) | `xdotool`, else `wmctrl`, whichever is installed |
+| GNOME/KDE on Wayland, macOS              | not raised; the tmux jump still happens                      |
+
+For anything else, set `@tmux-agent-raise-command` to your own command. It
+gets the tmux client's PID as its last argument; the terminal owning the
+window is one of its ancestors.
+
 ## Options
 
 | Option                        | Default       | Effect |
@@ -92,6 +124,7 @@ your config lives in `~/.config/tmux`. Adjust the paths above to match.
 | `@tmux-agent-strip-position`  | `interpolate` | `interpolate`: replace `#{agent_status}` in `status-left`/`status-right`; `centre`: put the strip in the middle of the status bar; `off`: no strip |
 | `@tmux-agent-strip-max`       | `4`           | agents shown by name before switching to counts |
 | `@tmux-agent-notify`          | `on`          | desktop notifications; `off` to silence |
+| `@tmux-agent-raise-command`   | detected      | raises the terminal window when a notification is clicked; a command (gets the client PID) or `off` |
 
 Set options before the `@plugin` line runs, that is, above TPM's `run` line.
 
@@ -103,6 +136,7 @@ Set options before the `@plugin` line runs, that is, above TPM's `run` line.
 tmux-agent status [--json]     list agent panes and states
 tmux-agent attach --next       jump to the most urgent agent pane
 tmux-agent attach --urgent [--from %3]   next blocked/ready pane, after %3
+tmux-agent focus --pane %3     switch a client to %3 and raise its terminal
 tmux-agent wait --pane %3 --state ready [--timeout 600]
 tmux-agent window-dot @1       rollup state dot, for window-status-format
 tmux-agent pane-label %3       agent + state, for pane-border-format

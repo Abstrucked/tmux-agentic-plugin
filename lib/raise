@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# raise -- bring the terminal window a tmux client runs in to the front:
+# switch to its workspace or tag and focus it. `tmux-agent focus` calls it
+# with the client's PID when a notification is clicked.
+#
+#   raise <client pid>
+#
+# The tmux option @tmux-agent-raise-command overrides the detection: "off"
+# does nothing, any other value runs as a shell command with the client PID
+# appended. Otherwise the window manager is detected from the client's
+# environment, in this order:
+#   Hyprland  hyprctl eval (0.55+ Lua config), else hyprctl dispatch
+#   sway      swaymsg [pid=N] focus
+#   awesome   awesome-client, c:jump_to()
+#   X11       any EWMH window manager (i3, bspwm, xfwm, KDE/GNOME on X11)
+#             through xdotool, else wmctrl
+# Anything else (GNOME/KDE on Wayland, macOS) is left alone. Best effort:
+# it always exits 0, since the tmux side of the jump has already happened.
+set -euo pipefail
+
+declare -r CLIENT_PID=${1:-}
+# Variables the window manager checks read, taken from the client process.
+declare -r WM_VARS='HYPRLAND_INSTANCE_SIGNATURE SWAYSOCK DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR XAUTHORITY DBUS_SESSION_BUS_ADDRESS'
+PIDS=()
+
+load_client_env() {
+    # The client's environment is the graphical session it was attached
+    # from. The tmux server's can be stale: the server may have outlived the
+    # session it started in. Without procfs (macOS), keep our own.
+    local env=/proc/$CLIENT_PID/environ entry var
+    [[ -r $env ]] || return 0
+    local -A found=()
+    while IFS= read -r -d '' entry; do
+        for var in $WM_VARS; do
+            [[ $entry == "$var="* ]] && found[$var]=${entry#*=}
+        done
+    done <"$env"
+    for var in $WM_VARS; do
+        if [[ -n ${found[$var]:-} ]]; then
+            export "$var=${found[$var]}"
+        else
+            unset "$var"
+        fi
+    done
+}
+
+ancestors() {
+    # The client PID and its ancestors, nearest first: the terminal emulator
+    # owning the window is usually two up (terminal -> shell -> tmux).
+    local pid=$CLIENT_PID n=0
+    while [[ $pid =~ ^[0-9]+$ ]] && ((pid > 1 && n++ < 64)); do
+        printf '%s\n' "$pid"
+        pid=$(ps -o ppid= -p "$pid" 2>/dev/null) || break
+        pid=${pid//[[:space:]]/}
+    done
+}
+
+raise_hyprland() {
+    command -v hyprctl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 1
+    local clients pid addr='' reply
+    clients=$(hyprctl clients -j 2>/dev/null) || return 1
+    for pid in "${PIDS[@]}"; do
+        addr=$(jq -r --argjson pid "$pid" \
+            'first(.[] | select(.pid == $pid) | .address) // empty' <<<"$clients") || addr=''
+        [[ -z $addr ]] || break
+    done
+    [[ -n $addr ]] || return 1
+    # A Lua config (0.55+) has no dispatch, older releases no eval. Focusing
+    # twice is harmless, so fall back unless eval clearly succeeded.
+    reply=$(hyprctl eval "hl.dispatch(hl.dsp.focus({ window = \"address:$addr\" }))" 2>/dev/null) || reply=''
+    [[ $reply == ok ]] && return 0
+    hyprctl dispatch focuswindow "address:$addr" >/dev/null 2>&1
+}
+
+raise_sway() {
+    command -v swaymsg >/dev/null 2>&1 || return 1
+    local pid
+    for pid in "${PIDS[@]}"; do
+        swaymsg "[pid=$pid] focus" >/dev/null 2>&1 && return 0
+    done
+    return 1
+}
+
+raise_awesome() {
+    command -v awesome-client >/dev/null 2>&1 || return 1
+    pgrep -u "$(id -u)" -x awesome >/dev/null 2>&1 || return 1
+    local list
+    list=$(
+        IFS=,
+        printf '%s' "${PIDS[*]}"
+    )
+    # jump_to switches to the client's tag, un-minimizes, focuses and raises.
+    awesome-client "for _, pid in ipairs({ $list }) do
+  for _, c in ipairs(client.get()) do
+    if c.pid == pid then c:jump_to(false) return end
+  end
+end" >/dev/null 2>&1
+}
+
+raise_x11() {
+    [[ -n ${DISPLAY:-} ]] || return 1
+    local pid win
+    if command -v xdotool >/dev/null 2>&1; then
+        for pid in "${PIDS[@]}"; do
+            win=$(xdotool search --pid "$pid" 2>/dev/null | head -n 1) || win=''
+            if [[ -n $win ]]; then
+                xdotool windowactivate "$win" >/dev/null 2>&1
+                return
+            fi
+        done
+    fi
+    if command -v wmctrl >/dev/null 2>&1; then
+        for pid in "${PIDS[@]}"; do
+            # wmctrl -lp columns: window id, desktop, pid, host, title.
+            win=$(wmctrl -lp 2>/dev/null | awk -v pid="$pid" '$3 == pid { print $1; exit }') || win=''
+            if [[ -n $win ]]; then
+                wmctrl -i -a "$win" >/dev/null 2>&1
+                return
+            fi
+        done
+    fi
+    return 1
+}
+
+main() {
+    [[ $CLIENT_PID =~ ^[0-9]+$ ]] || return 0
+    local cmd
+    cmd=$(tmux show-option -gqv @tmux-agent-raise-command 2>/dev/null) || cmd=''
+    case $cmd in
+    off) return 0 ;;
+    '') ;;
+    *)
+        sh -c "$cmd"' "$1"' tmux-agent-raise "$CLIENT_PID"
+        return
+        ;;
+    esac
+    load_client_env
+    mapfile -t PIDS < <(ancestors)
+    ((${#PIDS[@]})) || return 0
+    if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+        raise_hyprland
+    elif [[ -n ${SWAYSOCK:-} ]]; then
+        raise_sway
+    else
+        raise_awesome || raise_x11
+    fi
+}
+
+main || true
+exit 0
