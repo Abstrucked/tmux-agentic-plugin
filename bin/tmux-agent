@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # tmux-agent -- agent awareness for tmux. Detects coding agents running in
 # panes (opencode, claude, codex, ...) and tracks their state:
 #   blocked (red)    -- needs input or approval
@@ -7,30 +7,32 @@
 #   idle (green)     -- finished and seen
 #
 # Subcommands:
-#   strip                state mark + agent name for the status bar
+#   strip [--max N]      state mark + agent name for the status bar
 #   window-dot <win_id>  rollup state dot for a window status entry
 #   pane-label <pane_id> agent + state label for pane-border-format
 #   seen <pane_id>       mark the pane's state as seen (pane-focus-in hook)
 #   status [--json]      list agent panes and states
-#   pick                 fuzzy finder over agent panes (prefix + A)
+#   pick                 fuzzy finder over agent panes (prefix + a)
 #   read --pane <id> [--lines N] [--ansi]   pane snapshot for fzf previews
 #   wait --pane <id> --state <state> [--timeout SEC]
 #   report --pane <id> --state <state>      hook-reported state override
 #   hook <agent> <event> agent lifecycle hook (Claude Code, Codex, OpenCode)
-#   install-hooks [claude|codex|opencode ...]  wire the agents' hooks up
-#   place-strip          centre the strip in the status bar (tmux.conf)
+#   install-hooks [--remove] [claude|codex|opencode ...]
+#                        wire the agents' hooks up (or remove them)
+#   place-strip [--max N]  centre the strip in the status bar
 #   attach --next        jump to the most urgent agent pane
 #   refresh              update cached state now
 #
 # State is cached in $TMUX_AGENT_STATE_DIR (default /tmp/tmux-agent-$UID).
-# tmux's status interval drives refreshes; set TMUX_AGENT_QUIET=1 to skip
-# desktop notifications. The strip lists agents by name up to
-# TMUX_AGENT_STRIP_MAX (default 4, tmux set-environment -g), then counts.
+# tmux's status interval drives refreshes. Desktop notifications are off
+# with the tmux option @tmux-agent-notify off (or TMUX_AGENT_QUIET=1). The
+# strip names agents up to --max (default $TMUX_AGENT_STRIP_MAX, else 4),
+# then counts them per state.
 set -euo pipefail
 
 SELF="$(readlink -f "$0")"
-# shellcheck source=../lib/tmux-agent/engine.sh
-. "$(dirname "$SELF")/../lib/tmux-agent/engine.sh"
+# shellcheck source=../lib/engine.sh
+. "$(dirname "$SELF")/../lib/engine.sh"
 
 declare -r TA_STATE_DIR="${TMUX_AGENT_STATE_DIR:-${TMPDIR:-/tmp}/tmux-agent-$(id -u)}"
 declare -r TA_PANE_FMT='#{pane_id}|#{pane_pid}|#{window_id}|#{session_name}:#{window_index}.#{pane_index}|#{pane_current_path}'
@@ -67,13 +69,21 @@ pane_in_view() {
 
 notify() {
     # $1 agent, $2 state, $3 tmux target, $4 working directory.
-    command -v notify-send >/dev/null 2>&1 || return 0
-    local what=finished urgency=normal
+    [[ $(tmux show-option -gqv @tmux-agent-notify 2>/dev/null) != off ]] || return 0
+    local what=finished urgency=normal title body
     if [[ $2 == blocked ]]; then
         what='needs input'
         urgency=critical
     fi
-    notify-send -a tmux-agent -u "$urgency" "$1 $what" "${4##*/} · $3" 2>/dev/null || true
+    title="$1 $what" body="${4##*/} · $3"
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send -a tmux-agent -u "$urgency" "$title" "$body" 2>/dev/null || true
+    elif command -v osascript >/dev/null 2>&1; then
+        # Text goes in as arguments, so quotes in paths need no escaping.
+        osascript -e 'on run argv' \
+            -e 'display notification (item 2 of argv) with title (item 1 of argv)' \
+            -e 'end run' "$title" "$body" >/dev/null 2>&1 || true
+    fi
 }
 
 mark_seen() {
@@ -86,10 +96,25 @@ refresh() {
     # scans so a transition is seen, and notified, exactly once.
     local lock_fd rc=0
     mkdir -p "$TA_STATE_DIR"
-    exec {lock_fd}>"$TA_STATE_DIR/lock"
-    flock "$lock_fd"
+    if command -v flock >/dev/null 2>&1; then
+        exec {lock_fd}>"$TA_STATE_DIR/lock"
+        flock "$lock_fd"
+        scan "$@" || rc=$?
+        exec {lock_fd}>&-
+        return "$rc"
+    fi
+    # No flock (macOS): mkdir is atomic. A lock held past 10s was left by
+    # a killed scan, so take it over.
+    local lock="$TA_STATE_DIR/lock.d" tries=0
+    until mkdir "$lock" 2>/dev/null; do
+        if ((++tries > 100)); then
+            rmdir "$lock" 2>/dev/null || true
+            tries=0
+        fi
+        sleep 0.1
+    done
     scan "$@" || rc=$?
-    exec {lock_fd}>&-
+    rmdir "$lock" 2>/dev/null || true
     return "$rc"
 }
 
@@ -191,10 +216,29 @@ strip_item() {
         "$(ta_state_color "$1")" "$(ta_state_char "$1")" "$sep" "$label" "$2"
 }
 
+strip_max() {
+    # Name limit for the strip: "--max N" in $@, else TMUX_AGENT_STRIP_MAX,
+    # else 4. Non-numbers fall back to 4: the value ends up in arithmetic.
+    local max=${TMUX_AGENT_STRIP_MAX:-4}
+    while (($#)); do
+        case $1 in
+        --max)
+            max=${2:-}
+            shift $(($# > 1 ? 2 : 1))
+            ;;
+        *) shift ;;
+        esac
+    done
+    [[ $max =~ ^[0-9]+$ ]] || max=4
+    echo "$max"
+}
+
 strip() {
-    # One "mark name" per agent, most urgent first. Past TMUX_AGENT_STRIP_MAX
-    # agents, keep the bar short: one "mark count" per state, naming only
-    # blocked agents while there are at most two of them.
+    # One "mark name" per agent, most urgent first. Past the limit (see
+    # strip_max), keep the bar short: one "mark count" per state, naming
+    # only blocked agents while there are at most two of them.
+    local max
+    max=$(strip_max "$@")
     refresh
     local f st ag s i out=''
     local -a sts=() ags=()
@@ -208,7 +252,7 @@ strip() {
             n[$st]=$((${n[$st]:-0} + 1))
         done
     done
-    if ((${#sts[@]} <= ${TMUX_AGENT_STRIP_MAX:-4})); then
+    if ((${#sts[@]} <= max)); then
         for i in "${!sts[@]}"; do
             out="$out${out:+  }$(strip_item "${sts[i]}" "${ags[i]}")"
         done
@@ -386,18 +430,28 @@ cmd_hook() {
     return 0
 }
 
+unplace_strip() {
+    # Drop strips placed earlier, from any path or limit, out of stdin.
+    sed -E 's/(#\[nolist align=absolute-centre\]| )?#\([^)]*tmux-agent[^)]*strip[^)]*\)//g'
+}
+
 cmd_place_strip() {
     # Centre the agent strip in the status bar: insert it into
     # status-format[0] just before the status-right section. Formats
     # without that section get the strip appended to status-right.
-    local strip='#(~/.local/bin/tmux-agent strip)' fmt marker='#[nolist align=right'
+    # Re-running replaces the strip, so a moved plugin or a new limit
+    # takes effect on config reload.
+    local max strip fmt marker='#[nolist align=right' right
+    max=$(strip_max "$@")
+    strip="#('$SELF' strip --max $max)"
     fmt=$(tmux show -gv 'status-format[0]' 2>/dev/null) || return 0
-    [[ $fmt == *"tmux-agent strip"* ]] && return 0
+    fmt=$(unplace_strip <<<"$fmt")
     if [[ $fmt == *"$marker"* ]]; then
         tmux set -g 'status-format[0]' \
             "${fmt/"$marker"/"#[nolist align=absolute-centre]$strip$marker"}"
-    elif [[ $(tmux show -gv status-right) != *"tmux-agent strip"* ]]; then
-        tmux set -ag status-right " $strip"
+    else
+        right=$(tmux show -gv status-right 2>/dev/null | unplace_strip)
+        tmux set -g status-right "$right $strip"
     fi
 }
 
@@ -477,7 +531,8 @@ cmd_pick() {
 }
 
 usage() {
-    sed -n '2,28p' "$SELF" | sed 's/^# \{0,1\}//'
+    # The header comment, up to the first line of code.
+    awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$SELF"
 }
 
 main() {
@@ -485,7 +540,7 @@ main() {
     shift || true
     case $cmd in
     refresh) refresh "${1:-0}" ;;
-    strip) strip ;;
+    strip) strip "$@" ;;
     window-dot) window_dot "${1:-}" ;;
     pane-label) pane_label "${1:-}" ;;
     seen) mark_seen "${1:-}" ;;
@@ -495,8 +550,8 @@ main() {
     wait) cmd_wait "$@" ;;
     report) cmd_report "$@" ;;
     hook) cmd_hook "$@" || true ;;
-    place-strip) cmd_place_strip ;;
-    install-hooks) "$(dirname "$SELF")/../lib/tmux-agent/install-hooks" "$@" ;;
+    place-strip) cmd_place_strip "$@" ;;
+    install-hooks) "$(dirname "$SELF")/../lib/install-hooks" "$@" ;;
     attach) cmd_attach "$@" ;;
     *)
         usage

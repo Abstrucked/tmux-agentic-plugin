@@ -1,20 +1,21 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # install-hooks -- wire coding agents' lifecycle hooks to tmux-agent.
-# Usage: tmux-agent install-hooks [claude] [codex] [opencode]  (default: all)
+# Usage: tmux-agent install-hooks [--remove] [claude] [codex] [opencode]
+#        (default: all three)
 #
 #   claude    ~/.claude/settings.json   "hooks" entries (merged)
 #   codex     ~/.codex/hooks.json       "hooks" entries (merged)
 #   opencode  ~/.config/opencode/plugins/tmux-agent (symlinked directory)
 #
-# Re-running replaces earlier tmux-agent entries and keeps everything else.
+# Re-running replaces earlier tmux-agent entries, including ones pointing
+# at an older install path, and keeps everything else. --remove drops them.
 set -euo pipefail
 
-LIB="$(dirname "$(readlink -f "$0")")"
-declare -r LIB
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+declare -r ROOT
 # Absolute path: Codex does not run hook commands through a shell.
-BIN="$HOME/.local/bin/tmux-agent"
-[[ -x $BIN ]] || BIN="$(readlink -f "$LIB/../../bin/tmux-agent")"
-declare -r BIN
+declare -r BIN="$ROOT/bin/tmux-agent"
+REMOVE=0
 
 # Events each agent reports, "Event" or "Event=matcher". Claude's
 # Notification only means blocked for permission and question dialogs.
@@ -23,8 +24,12 @@ declare -r CODEX_EVENTS='SessionStart UserPromptSubmit PreToolUse PostToolUse Pe
 
 merge_hooks() {
     # $1 JSON settings file, $2 agent name, $3 event list. Drops previous
-    # tmux-agent hooks, then appends one per event.
+    # tmux-agent hooks, then appends one per event (none with --remove).
     local file=$1 agent=$2 events=$3 tmp
+    if ((REMOVE)); then
+        [[ -s $file ]] || return 0
+        events=''
+    fi
     mkdir -p "$(dirname "$file")"
     [[ -s $file ]] || echo '{}' >"$file"
     tmp=$(mktemp "$file.XXXXXX")
@@ -33,7 +38,7 @@ merge_hooks() {
         .hooks = ((.hooks // {})
             | with_entries(.value |= map(select(ours | not)))
             | with_entries(select(.value | length > 0)))
-        | reduce ($events | split(" ")[]) as $spec (.;
+        | reduce ($events | split(" ")[] | select(. != "")) as $spec (.;
             ($spec | split("=")) as [$event, $matcher]
             | .hooks[$event] += [
                 ({hooks: [{type: "command", timeout: 5,
@@ -44,7 +49,11 @@ merge_hooks() {
     # Write through the path so a symlinked settings file stays a symlink.
     cat "$tmp" >"$file"
     rm -f "$tmp"
-    echo "tmux-agent: $agent hooks -> $file"
+    if ((REMOVE)); then
+        echo "tmux-agent: $agent hooks removed from $file"
+    else
+        echo "tmux-agent: $agent hooks -> $file"
+    fi
 }
 
 install_claude() {
@@ -54,6 +63,7 @@ install_claude() {
 install_codex() {
     local config="$HOME/.codex/config.toml"
     merge_hooks "$HOME/.codex/hooks.json" codex "$CODEX_EVENTS"
+    ((REMOVE)) && return 0
     if ! awk '/^\[/{s=$0} s=="[features]" && /^[[:space:]]*hooks[[:space:]]*=[[:space:]]*true/{f=1} END{exit !f}' \
         "$config" 2>/dev/null; then
         echo "tmux-agent: add 'hooks = true' under [features] in $config to enable Codex hooks" >&2
@@ -64,8 +74,13 @@ install_opencode() {
     # OpenCode 2 loads directory plugins from plugins/: index.js for the
     # shared server, tui.js for the TUI that runs in the pane.
     local dir="$HOME/.config/opencode" tmp
+    if ((REMOVE)); then
+        [[ -L $dir/plugins/tmux-agent ]] && rm -f "$dir/plugins/tmux-agent" &&
+            echo "tmux-agent: opencode plugin removed from $dir/plugins"
+        return 0
+    fi
     mkdir -p "$dir/plugins"
-    ln -sfn "$LIB/opencode" "$dir/plugins/tmux-agent"
+    ln -sfn "$ROOT/opencode" "$dir/plugins/tmux-agent"
     # Drop the single-file links and tui.jsonc entry earlier versions made.
     rm -f "$dir/plugins/tmux-agent.js" "$dir/tmux-agent-tui.js"
     if [[ -f $dir/tui.jsonc ]] && jq -e '.plugin | index("./tmux-agent-tui.js")' "$dir/tui.jsonc" >/dev/null 2>&1; then
@@ -81,6 +96,10 @@ main() {
         echo "tmux-agent: install-hooks needs jq" >&2
         exit 1
     }
+    if [[ ${1:-} == --remove ]]; then
+        REMOVE=1
+        shift
+    fi
     (($#)) || set -- claude codex opencode
     local agent
     for agent in "$@"; do

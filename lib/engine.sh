@@ -1,6 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # engine.sh -- agent detection and state classification for tmux-agent.
-# Sourced by ~/.local/bin/tmux-agent and by tests/test_tmux_agent.py.
+# Sourced by bin/tmux-agent and by tests/test_tmux_agent.py.
 #
 # Detection walks the pane's process tree looking for a known coding-agent
 # CLI. Classification is heuristic: CPU-time deltas say "working", and the
@@ -165,7 +165,9 @@ ta_classify() {
 
 ta_agent_name_of() {
     # $1 process name, $2 argv. Prints the matched agent name, if any.
+    # macOS ps reports comm as the executable path: match its basename.
     local comm=${1,,} args=${2,,} name
+    comm=${comm##*/}
     for name in $TA_AGENT_NAMES; do
         case "$comm" in
         "$name" | "$name"-*)
@@ -215,9 +217,36 @@ ta_detect_agent() {
 
 ta_proc_cpu() {
     # utime+stime+cutime+cstime in clock ticks for $1 and its waited-for
-    # children, from /proc/<pid>/stat (fields 14-17).
+    # children, from /proc/<pid>/stat (fields 14-17). Without procfs
+    # (macOS), the process's own CPU time from ps, in hundredths.
     local stat f
-    stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
-    read -r -a f <<<"${stat##*) }"
-    echo $((${f[11]:-0} + ${f[12]:-0} + ${f[13]:-0} + ${f[14]:-0}))
+    if [[ -r /proc/$1/stat ]]; then
+        stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+        read -r -a f <<<"${stat##*) }"
+        echo $((${f[11]:-0} + ${f[12]:-0} + ${f[13]:-0} + ${f[14]:-0}))
+        return 0
+    fi
+    stat=$(ps -o time= -p "$1" 2>/dev/null) || return 1
+    ta_ps_time_ticks "$stat"
+}
+
+ta_ps_time_ticks() {
+    # ps "time" ([dd-][hh:]mm:ss[.cc]) in hundredths of a second.
+    local t=${1//[[:space:]]/} days=0 cs=0 secs=0 part
+    [[ $t =~ ^([0-9]+-)?[0-9:]+(\.[0-9]+)?$ ]] || return 1
+    if [[ $t == *-* ]]; then
+        days=${t%%-*}
+        t=${t#*-}
+    fi
+    if [[ $t == *.* ]]; then
+        cs=${t##*.}
+        cs=${cs:0:2}
+        ((${#cs} == 2)) || cs="${cs}0"
+        t=${t%.*}
+    fi
+    local IFS=:
+    for part in $t; do
+        secs=$((secs * 60 + 10#$part))
+    done
+    echo $(((10#$days * 86400 + secs) * 100 + 10#$cs))
 }

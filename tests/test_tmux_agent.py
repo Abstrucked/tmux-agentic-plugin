@@ -1,12 +1,13 @@
 """Run with: pytest tests (or python3 -B -m unittest discover -s tests).
 
 Classification fixtures, detection checks and CLI smoke tests for
-scripts/.local/lib/tmux-agent/engine.sh and scripts/.local/bin/tmux-agent.
+lib/engine.sh, bin/tmux-agent, lib/install-hooks and the TPM entry point.
 """
 
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 import shutil
 import signal
@@ -16,8 +17,9 @@ import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-ENGINE = ROOT / "scripts" / ".local" / "lib" / "tmux-agent" / "engine.sh"
-CLI = ROOT / "scripts" / ".local" / "bin" / "tmux-agent"
+ENGINE = ROOT / "lib" / "engine.sh"
+CLI = ROOT / "bin" / "tmux-agent"
+ENTRY = ROOT / "tmux-agentic.tmux"
 
 
 def bash(script, *args, env=None):
@@ -28,6 +30,20 @@ def bash(script, *args, env=None):
         ["bash", "-c", prelude + script, "ta", *args],
         capture_output=True, text=True, env=e,
     )
+
+
+def fake_tmux(directory, replies=None):
+    """Put a tmux stand-in in directory: it logs each call's arguments and
+    answers the calls listed in replies ("args joined by spaces" -> output).
+    Returns the log path."""
+    log = Path(directory) / "tmux.log"
+    cases = "".join(f"{shlex.quote(k)}) printf '%s' {shlex.quote(v)} ;;\n"
+                    for k, v in (replies or {}).items())
+    script = Path(directory) / "tmux"
+    script.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >>{shlex.quote(str(log))}\n'
+                      f'case "$*" in\n{cases}esac\n')
+    script.chmod(0o755)
+    return log
 
 
 class ClassifyTests(unittest.TestCase):
@@ -167,6 +183,11 @@ class GlyphTests(unittest.TestCase):
         r = bash('ta_agent_name_of bash "bash"')
         self.assertEqual(r.returncode, 1)
 
+    def test_agent_name_from_comm_path(self):
+        # macOS ps reports comm as the executable's path.
+        r = bash('ta_agent_name_of /opt/homebrew/bin/codex ""')
+        self.assertEqual(r.stdout.strip(), "codex")
+
 
 class DetectTests(unittest.TestCase):
     def tearDown(self):
@@ -207,6 +228,15 @@ class DetectTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertGreaterEqual(int(r.stdout.strip()), 0)
 
+    def test_ps_time_in_hundredths(self):
+        # procps (Linux) and BSD (macOS) ps "time" formats.
+        for time_, ticks in (("00:00:01", "100"), ("0:01.23", "123"),
+                             ("12:34.5", "75450"), ("1-02:03:04", "9378400")):
+            with self.subTest(time=time_):
+                r = bash('ta_ps_time_ticks "$1"', time_)
+                self.assertEqual(r.stdout.strip(), ticks, r.stderr)
+        self.assertEqual(bash('ta_ps_time_ticks bogus').returncode, 1)
+
 
 class CliSmokeTests(unittest.TestCase):
     def run_cli(self, *args):
@@ -233,8 +263,9 @@ class CliSmokeTests(unittest.TestCase):
     MIXED_AGENTS = (("idle", "claude"), ("ready", "codex"),
                     ("working", "opencode"), ("blocked", "claude"))
 
-    def run_strip(self, agents, **env):
-        # agents: (state, agent) per pane, written as cached state files.
+    def run_strip(self, agents, max_=None, **env):
+        # agents: (state, agent) per pane, written as cached state files;
+        # max_ is passed as --max.
         with tempfile.TemporaryDirectory(prefix="ta-strip-") as directory:
             state_dir = Path(directory)
             (state_dir / "stamp").write_text(str(int(time.time())) + "\n")
@@ -243,7 +274,8 @@ class CliSmokeTests(unittest.TestCase):
                     f"{state}|{agent}|0|0|0|example:1.1|@1|/project\n"
                 )
             r = subprocess.run(
-                [str(CLI), "strip"], capture_output=True, text=True,
+                [str(CLI), "strip", *(["--max", max_] if max_ else [])],
+                capture_output=True, text=True,
                 env={**os.environ, "TMUX_AGENT_STATE_DIR": directory, **env},
             )
             self.assertEqual(r.returncode, 0, r.stderr)
@@ -275,6 +307,31 @@ class CliSmokeTests(unittest.TestCase):
             "  #[fg=blue]◉#[fg=white]1#[default]"
             "  #[fg=green]○#[fg=gray]1#[default]",
         )
+
+    def test_strip_max_argument_wins_over_environment(self):
+        named = self.run_strip(self.MIXED_AGENTS)
+        self.assertEqual(
+            self.run_strip(self.MIXED_AGENTS, TMUX_AGENT_STRIP_MAX="2", max_="4"), named)
+        # Anything but a number falls back to the default of 4.
+        self.assertEqual(self.run_strip(self.MIXED_AGENTS, max_="$(id)"), named)
+
+    def test_place_strip_replaces_an_earlier_strip(self):
+        with tempfile.TemporaryDirectory(prefix="ta-place-") as directory:
+            log = fake_tmux(directory, {
+                "show -gv status-format[0]":
+                    "L#[nolist align=absolute-centre]#(~/.local/bin/tmux-agent strip)"
+                    "#[nolist align=right R",
+            })
+            r = subprocess.run(
+                [str(CLI), "place-strip", "--max", "6"], capture_output=True, text=True,
+                env={**os.environ, "PATH": f"{directory}:{os.environ['PATH']}"},
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(
+                f"set -g status-format[0] L#[nolist align=absolute-centre]"
+                f"#('{CLI}' strip --max 6)#[nolist align=right R",
+                log.read_text().splitlines(),
+            )
 
     def test_strip_shows_every_pane_with_distinct_state_colors(self):
         self.assertEqual(
@@ -438,6 +495,21 @@ class InstallHooksTests(unittest.TestCase):
             self.assertEqual(notification[0]["matcher"],
                              "permission_prompt|elicitation_dialog")
 
+    def test_remove_drops_only_tmux_agent_hooks(self):
+        with tempfile.TemporaryDirectory(prefix="ta-home-") as home:
+            settings = Path(home) / ".claude" / "settings.json"
+            settings.parent.mkdir()
+            settings.write_text('{"hooks": {"Stop": [{"hooks": '
+                                '[{"type": "command", "command": "other"}]}]}}')
+            env = {**os.environ, "HOME": home}
+            for args in (["claude", "opencode"], ["--remove", "claude", "opencode"]):
+                r = subprocess.run([str(CLI), "install-hooks", *args],
+                                   capture_output=True, text=True, env=env)
+                self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(settings.read_text())["hooks"],
+                             {"Stop": [{"hooks": [{"type": "command", "command": "other"}]}]})
+            self.assertFalse((Path(home) / ".config/opencode/plugins/tmux-agent").exists())
+
     def test_opencode_plugin_directory_is_linked(self):
         with tempfile.TemporaryDirectory(prefix="ta-home-") as home:
             r = subprocess.run([str(CLI), "install-hooks", "opencode"],
@@ -445,9 +517,51 @@ class InstallHooksTests(unittest.TestCase):
                                env={**os.environ, "HOME": home})
             self.assertEqual(r.returncode, 0, r.stderr)
             plugin = Path(home) / ".config/opencode/plugins/tmux-agent"
-            self.assertEqual(plugin.resolve(), ENGINE.parent / "opencode")
+            self.assertEqual(plugin.resolve(), ROOT / "opencode")
             self.assertTrue((plugin / "index.js").is_file())
             self.assertTrue((plugin / "tui.js").is_file())
+
+
+class EntryPointTests(unittest.TestCase):
+    """tmux-agentic.tmux against a fake tmux: which commands it issues."""
+
+    def run_entry(self, replies=None):
+        with tempfile.TemporaryDirectory(prefix="ta-entry-") as directory:
+            log = fake_tmux(directory, replies)
+            r = subprocess.run(
+                [str(ENTRY)], capture_output=True, text=True,
+                env={**os.environ, "PATH": f"{directory}:{os.environ['PATH']}"},
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return log.read_text().splitlines()
+
+    def test_defaults_bind_picker_hook_focus_and_interpolate(self):
+        calls = self.run_entry({
+            "show-option -gqv status-right": "#[fg=blue]#{agent_status} host",
+        })
+        self.assertIn(f"bind-key a display-popup -E -w 80% -h 80% '{CLI}' pick", calls)
+        self.assertIn(f"set-hook -ga pane-focus-in run-shell \"'{CLI}' seen #{{pane_id}}\"",
+                      calls)
+        self.assertIn(f"set-option -gq status-right #[fg=blue]#('{CLI}' strip) host", calls)
+        self.assertFalse([c for c in calls if c.startswith("set-option -gq status-left")])
+
+    def test_options_change_key_size_limit_and_position(self):
+        calls = self.run_entry({
+            "show-option -gqv @tmux-agent-key": "off",
+            "show-option -gqv @tmux-agent-strip-position": "centre",
+            "show-option -gqv @tmux-agent-strip-max": "6",
+            "show -gv status-format[0]": "L#[nolist align=right R",
+        })
+        self.assertFalse([c for c in calls if c.startswith("bind-key")])
+        self.assertIn(f"set -g status-format[0] L#[nolist align=absolute-centre]"
+                      f"#('{CLI}' strip --max 6)#[nolist align=right R", calls)
+
+    def test_focus_hook_is_not_added_twice(self):
+        calls = self.run_entry({
+            "show-hooks -g pane-focus-in":
+                f"pane-focus-in[0] run-shell \"'{CLI}' seen #{{pane_id}}\"",
+        })
+        self.assertFalse([c for c in calls if c.startswith("set-hook")])
 
 
 @unittest.skipUnless(shutil.which("node"), "node not installed")
@@ -484,7 +598,7 @@ dispose();
 """
 
     def test_forwards_this_panes_root_session_and_prompts(self):
-        plugin = ENGINE.parent / "opencode" / "tui.js"
+        plugin = ROOT / "opencode" / "tui.js"
         with tempfile.TemporaryDirectory(prefix="ta-oc-") as directory:
             log = Path(directory) / "calls"
             bin_ = Path(directory) / "tmux-agent"

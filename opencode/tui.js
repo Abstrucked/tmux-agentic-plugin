@@ -8,8 +8,22 @@
 // `tmux-agent install-hooks`.
 
 import { spawn } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const BIN = process.env.TMUX_AGENT_BIN || `${process.env.HOME}/.local/bin/tmux-agent`;
+// Follow the plugins/ link back into the plugin checkout: its CLI sits at
+// ../bin/tmux-agent. Fall back to tmux-agent on PATH.
+function bundledBin() {
+  try {
+    const bin = join(dirname(realpathSync(fileURLToPath(import.meta.url))), "..", "bin", "tmux-agent");
+    return existsSync(bin) ? bin : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const BIN = process.env.TMUX_AGENT_BIN || bundledBin() || "tmux-agent";
 
 // Server bus events forwarded as-is; tmux-agent maps them to states.
 // Execution events only count for root sessions: a subagent finishing does
