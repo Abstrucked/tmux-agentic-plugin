@@ -126,6 +126,14 @@ class RollupTests(unittest.TestCase):
                  '$(ta_state_color ready) $(ta_state_color idle)"')
         self.assertEqual(r.stdout.strip(), "red yellow blue green")
 
+    def test_state_marks_are_distinct_and_reset_colour(self):
+        r = bash('ta_state_mark ready')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "\x1b[34m◉\x1b[0m")
+        r = bash('for s in blocked working ready idle; do ta_state_mark "$s"; echo; done')
+        marks = [re.sub(r"\x1b\[[0-9;]*m", "", m) for m in r.stdout.splitlines()]
+        self.assertEqual(marks, ["◆", "●", "◉", "○"])
+
 
 class GlyphTests(unittest.TestCase):
     def test_default_glyphs_differ(self):
@@ -222,29 +230,60 @@ class CliSmokeTests(unittest.TestCase):
         r = self.run_cli("report")
         self.assertEqual(r.returncode, 1)
 
-    def test_strip_shows_every_pane_with_distinct_state_colors(self):
+    MIXED_AGENTS = (("idle", "claude"), ("ready", "codex"),
+                    ("working", "opencode"), ("blocked", "claude"))
+
+    def run_strip(self, agents, **env):
+        # agents: (state, agent) per pane, written as cached state files.
         with tempfile.TemporaryDirectory(prefix="ta-strip-") as directory:
             state_dir = Path(directory)
             (state_dir / "stamp").write_text(str(int(time.time())) + "\n")
-            for pane, state, agent in (
-                (1, "idle", "claude"),
-                (2, "ready", "codex"),
-                (3, "working", "opencode"),
-                (4, "blocked", "claude"),
-            ):
+            for pane, (state, agent) in enumerate(agents, 1):
                 (state_dir / f"state-%{pane}").write_text(
                     f"{state}|{agent}|0|0|0|example:1.1|@1|/project\n"
                 )
             r = subprocess.run(
                 [str(CLI), "strip"], capture_output=True, text=True,
-                env={**os.environ, "TMUX_AGENT_STATE_DIR": directory},
+                env={**os.environ, "TMUX_AGENT_STATE_DIR": directory, **env},
             )
             self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual(
-                r.stdout,
-                " #[fg=red]\uec82#[default] #[fg=yellow]\uec67#[default]"
-                " #[fg=blue]\uec81#[default] #[fg=green]\uec82#[default]",
-            )
+            return r.stdout
+
+    def test_strip_collapses_to_counts_past_the_limit(self):
+        out = self.run_strip([("blocked", "claude")] + [("working", "codex")] * 3
+                             + [("idle", "opencode")] * 2)
+        self.assertEqual(
+            out,
+            "#[fg=red]◆ #[fg=white]claude#[default]"
+            "  #[fg=yellow]●#[fg=white]3#[default]"
+            "  #[fg=green]○#[fg=gray]2#[default]",
+        )
+
+    def test_strip_counts_blocked_when_many_are_blocked(self):
+        out = self.run_strip([("blocked", "claude")] * 3 + [("working", "codex")] * 2)
+        self.assertEqual(
+            out,
+            "#[fg=red]◆#[fg=white]3#[default]  #[fg=yellow]●#[fg=white]2#[default]",
+        )
+
+    def test_strip_max_is_configurable(self):
+        out = self.run_strip(self.MIXED_AGENTS, TMUX_AGENT_STRIP_MAX="2")
+        self.assertEqual(
+            out,
+            "#[fg=red]◆ #[fg=white]claude#[default]"
+            "  #[fg=yellow]●#[fg=white]1#[default]"
+            "  #[fg=blue]◉#[fg=white]1#[default]"
+            "  #[fg=green]○#[fg=gray]1#[default]",
+        )
+
+    def test_strip_shows_every_pane_with_distinct_state_colors(self):
+        self.assertEqual(
+            self.run_strip(self.MIXED_AGENTS),
+            "#[fg=red]\u25c6 #[fg=white]claude#[default]"
+            "  #[fg=yellow]\u25cf #[fg=white]opencode#[default]"
+            "  #[fg=blue]\u25c9 #[fg=white]codex#[default]"
+            "  #[fg=green]\u25cb #[fg=gray]claude#[default]",
+        )
 
 
 
@@ -271,13 +310,42 @@ class CliSmokeTests(unittest.TestCase):
                      "PATH": f"{fake}:{os.environ['PATH']}"},
             )
             self.assertEqual(r.returncode, 0, r.stderr)
+            raw = (state_dir / "rows").read_text().splitlines()
+            # Only the state mark is coloured; the text after it stays plain.
+            for line in raw:
+                self.assertTrue(line.startswith("\x1b[32m○\x1b[0m"), repr(line))
+                self.assertNotIn("\x1b[", line.partition("\x1b[0m")[2])
             rows = [re.sub(r"\x1b\[[0-9;]*m", "", line).split("\t")
-                    for line in (state_dir / "rows").read_text().splitlines()]
+                    for line in raw]
             self.assertEqual([pane for _, pane in rows], ["%1", "%2", "%3"])
             shown = [text for text, _ in rows]
             for column in ("work:", "0m"):
                 self.assertEqual(len({line.index(column) for line in shown}), 1, shown)
             self.assertNotIn("12345", "".join(shown))
+
+    def test_pick_switches_client_to_pane_in_another_session(self):
+        with tempfile.TemporaryDirectory(prefix="ta-goto-") as directory:
+            state_dir = Path(directory)
+            now = int(time.time())
+            (state_dir / "stamp").write_text(f"{now}\n")
+            (state_dir / "state-%5").write_text(
+                f"ready|codex|0|{now}|{now}|other:1.1|@4|/src/app|12345\n"
+            )
+            fake = state_dir / "bin"
+            fake.mkdir()
+            (fake / "fzf").write_text("#!/bin/sh\nhead -n 1\n")
+            (fake / "tmux").write_text(f'#!/bin/sh\necho "$*" >>"{state_dir}/tmux.log"\n')
+            for tool in ("fzf", "tmux"):
+                (fake / tool).chmod(0o755)
+            r = subprocess.run(
+                [str(CLI), "pick"], capture_output=True, text=True,
+                env={**os.environ, "TMUX_AGENT_STATE_DIR": directory,
+                     "PATH": f"{fake}:{os.environ['PATH']}"},
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("switch-client -t %5",
+                          (state_dir / "tmux.log").read_text().splitlines())
+            self.assertTrue((state_dir / "seen-%5").exists())
 
 class HookTests(unittest.TestCase):
     def state_of(self, event):

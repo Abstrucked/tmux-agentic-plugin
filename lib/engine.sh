@@ -71,6 +71,22 @@ ta_state_ansi() {
     esac
 }
 
+ta_state_char() {
+    # Font-native mark per state: shape differs so it reads without colour.
+    case "$1" in
+    blocked) echo '◆' ;;
+    working) echo '●' ;;
+    ready) echo '◉' ;;
+    *) echo '○' ;;
+    esac
+}
+
+ta_state_mark() {
+    # State mark coloured and reset afterwards, for text lists (fzf picker,
+    # status) so the rest of the line keeps the normal text colour.
+    printf '%s%s\033[0m' "$(ta_state_ansi "$1")" "$(ta_state_char "$1")"
+}
+
 ta_agent_glyph() {
     # Nerd Font codicons: nf-cod-claude (U+EC82), nf-cod-openai (U+EC81)
     # for Codex, nf-cod-agent (U+EC67) for the rest. Overrides still accept

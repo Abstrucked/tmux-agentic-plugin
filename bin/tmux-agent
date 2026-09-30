@@ -7,7 +7,7 @@
 #   idle (green)     -- finished and seen
 #
 # Subcommands:
-#   strip                glyph strip for the status bar
+#   strip                state mark + agent name for the status bar
 #   window-dot <win_id>  rollup state dot for a window status entry
 #   pane-label <pane_id> agent + state label for pane-border-format
 #   seen <pane_id>       mark the pane's state as seen (pane-focus-in hook)
@@ -24,7 +24,8 @@
 #
 # State is cached in $TMUX_AGENT_STATE_DIR (default /tmp/tmux-agent-$UID).
 # tmux's status interval drives refreshes; set TMUX_AGENT_QUIET=1 to skip
-# desktop notifications.
+# desktop notifications. The strip lists agents by name up to
+# TMUX_AGENT_STRIP_MAX (default 4, tmux set-environment -g), then counts.
 set -euo pipefail
 
 SELF="$(readlink -f "$0")"
@@ -179,17 +180,51 @@ scan() {
     done
 }
 
+strip_item() {
+    # $1 state, $2 agent name or count. Coloured state mark, then the label:
+    # white, or gray once idle so settled agents step back. Names get a space
+    # after the mark; counts sit right against it.
+    local label=white sep=' '
+    [[ $1 == idle ]] && label=gray
+    [[ $2 =~ ^[0-9]+$ ]] && sep=''
+    printf '#[fg=%s]%s%s#[fg=%s]%s#[default]' \
+        "$(ta_state_color "$1")" "$(ta_state_char "$1")" "$sep" "$label" "$2"
+}
+
 strip() {
+    # One "mark name" per agent, most urgent first. Past TMUX_AGENT_STRIP_MAX
+    # agents, keep the bar short: one "mark count" per state, naming only
+    # blocked agents while there are at most two of them.
     refresh
-    local f st ag s out=''
+    local f st ag s i out=''
+    local -a sts=() ags=()
+    local -A n=()
     for s in blocked working ready idle; do
         for f in "$TA_STATE_DIR"/state-*; do
             [[ -e $f ]] || continue
             IFS='|' read -r st ag _rest <"$f" || continue
             [[ $st == "$s" ]] || continue
-            out="$out #[fg=$(ta_state_color "$st")]$(ta_agent_glyph "$ag")#[default]"
+            sts+=("$st") ags+=("$ag")
+            n[$st]=$((${n[$st]:-0} + 1))
         done
     done
+    if ((${#sts[@]} <= ${TMUX_AGENT_STRIP_MAX:-4})); then
+        for i in "${!sts[@]}"; do
+            out="$out${out:+  }$(strip_item "${sts[i]}" "${ags[i]}")"
+        done
+    else
+        for s in blocked working ready idle; do
+            ((${n[$s]:-0})) || continue
+            if [[ $s == blocked ]] && ((n[$s] <= 2)); then
+                for i in "${!sts[@]}"; do
+                    [[ ${sts[i]} == blocked ]] || continue
+                    out="$out${out:+  }$(strip_item blocked "${ags[i]}")"
+                done
+            else
+                out="$out${out:+  }$(strip_item "$s" "${n[$s]}")"
+            fi
+        done
+    fi
     printf '%s' "$out"
 }
 
@@ -238,7 +273,7 @@ cmd_status() {
                     '{pane:$pane,state:$state,agent:$agent,target:$target,window:$window,path:$path,age:$age}'
             else
                 printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-                    "$(ta_state_ansi "$st")$(ta_agent_glyph "$ag")" \
+                    "$(ta_state_mark "$st")" \
                     "$ag" "${path##*/}" "$tgt" "$(age_str "$age")" "$pane"
             fi
         done
@@ -368,9 +403,14 @@ cmd_place_strip() {
 
 goto_pane() {
     local pane=$1 wid
-    wid=$(tmux display-message -p -t "$pane" '#{window_id}')
-    tmux select-window -t "$wid"
-    tmux select-pane -t "$pane"
+    # switch-client with a pane target changes session, window and pane at
+    # once, so agents in other sessions (e.g. sessionizer ones) are reachable.
+    # Without an attached client, fall back to selecting in place.
+    if ! tmux switch-client -t "$pane" 2>/dev/null; then
+        wid=$(tmux display-message -p -t "$pane" '#{window_id}')
+        tmux select-window -t "$wid"
+        tmux select-pane -t "$pane"
+    fi
     mark_seen "$pane"
 }
 
@@ -426,7 +466,7 @@ cmd_pick() {
     local rows=()
     for i in "${!panes[@]}"; do
         # The pane id rides along after a tab, hidden from the list.
-        rows+=("$(ta_state_ansi "${sts[i]}")$(ta_agent_glyph "${ags[i]}")  $(pad "${ags[i]}" "$wa")  $(pad "${dirs[i]}" "$wd")  $(pad "${tgts[i]}" "$wt")  ${ages[i]}"$'\t'"${panes[i]}")
+        rows+=("$(ta_state_mark "${sts[i]}")  $(pad "${ags[i]}" "$wa")  $(pad "${dirs[i]}" "$wd")  $(pad "${tgts[i]}" "$wt")  ${ages[i]}"$'\t'"${panes[i]}")
     done
     local sel
     sel=$(printf '%s\n' "${rows[@]}" | fzf --ansi --reverse \
@@ -437,7 +477,7 @@ cmd_pick() {
 }
 
 usage() {
-    sed -n '2,27p' "$SELF" | sed 's/^# \{0,1\}//'
+    sed -n '2,28p' "$SELF" | sed 's/^# \{0,1\}//'
 }
 
 main() {
