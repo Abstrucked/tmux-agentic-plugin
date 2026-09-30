@@ -21,6 +21,11 @@ ENGINE = ROOT / "lib" / "engine.sh"
 CLI = ROOT / "bin" / "tmux-agent"
 ENTRY = ROOT / "tmux-agentic.tmux"
 
+# Keep every test off the real network: no listed hosts, no discovery of
+# live ssh connections. RemoteTests turn them back on explicitly.
+os.environ.setdefault("TMUX_AGENT_REMOTES", "")
+os.environ.setdefault("TMUX_AGENT_REMOTE_DISCOVER", "off")
+
 
 def bash(script, *args, env=None):
     """Run script under bash with the engine sourced; args arrive as $1..."""
@@ -893,6 +898,291 @@ dispose();
                     break
                 time.sleep(0.05)
             self.assertEqual(calls, want)
+
+
+def fake_ssh(directory):
+    """Put an ssh stand-in in directory. It logs each call's arguments to
+    ssh.log and answers:
+      -G <alias>       from G-<alias> if present, else <alias>.example as me:22
+      -O check ... d   succeeds when the -S socket has a "<socket>.live" file
+      ... <dest> <cmd> with answer-<dest>, exiting with answer-<dest>.rc
+    Returns the log path."""
+    d = Path(directory)
+    log = d / "ssh.log"
+    script = d / "ssh"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >>{shlex.quote(str(log))}\n'
+        'case "$1" in\n'
+        f'-G) f={shlex.quote(str(d))}/G-$2\n'
+        '    if [ -f "$f" ]; then cat "$f"; else\n'
+        '    printf "hostname %s.example\\nuser me\\nport 22\\n" "$2"; fi; exit 0 ;;\n'
+        '-O) [ -f "$4.live" ] && exit 0; exit 255 ;;\n'
+        'esac\n'
+        'cmd=; dest=\n'
+        'for a; do dest=$cmd; cmd=$a; done\n'
+        f'f={shlex.quote(str(d))}/answer-$dest\n'
+        '[ -f "$f.rc" ] && exit "$(cat "$f.rc")"\n'
+        '[ -f "$f" ] && cat "$f"\n'
+        'exit 0\n'
+    )
+    script.chmod(0o755)
+    return log
+
+
+class RemoteTests(unittest.TestCase):
+    """Agents on other hosts, fetched over (a fake) ssh."""
+
+    KEY = "me@devbox.example:22"
+    WINDOW_FMT = "#{window_id}|#{@tmux-agent-remote}"
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="ta-remote-"))
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.state = self.dir / "state"
+        self.state.mkdir()
+        self.fake = self.dir / "bin"
+        self.fake.mkdir()
+        # Unix socket paths are short (104 bytes on macOS), and macOS temp
+        # directories are long.
+        self.sockets = Path(tempfile.mkdtemp(prefix="ta-", dir="/tmp"))
+        self.addCleanup(shutil.rmtree, self.sockets, ignore_errors=True)
+        self.ssh_log = fake_ssh(self.fake)
+        self.tmux_replies = {}
+        self.now = int(time.time())
+        (self.state / "stamp").write_text(f"{self.now}\n")
+        self.env = {
+            **os.environ,
+            "TMUX_AGENT_QUIET": "1",
+            "TMUX_AGENT_STATE_DIR": str(self.state),
+            "PATH": f"{self.fake}:{os.environ['PATH']}",
+            "TMUX_AGENT_REMOTES": "devbox",
+            "TMUX_AGENT_REMOTE_DISCOVER": "off",
+            "TMUX_AGENT_SSH_SOCKETS": f"{self.sockets}/master-*",
+            "TMUX_AGENT_REMOTE_INTERVAL": "10",
+        }
+
+    def answer(self, dest, text="", rc=None):
+        (self.fake / f"answer-{dest}").write_text(text)
+        if rc is not None:
+            (self.fake / f"answer-{dest}.rc").write_text(str(rc))
+
+    def local(self, pane, state, agent="claude"):
+        (self.state / f"state-{pane}").write_text(
+            f"{state}|{agent}|0|{self.now}|{self.now}|main:1.1|@1|/src/app|1\n")
+
+    def cli(self, *args, **env):
+        self.tmux_log = fake_tmux(self.fake, self.tmux_replies)
+        return subprocess.run([str(CLI), *args], capture_output=True, text=True,
+                              env={**self.env, **env}, timeout=20)
+
+    def fetch(self, **env):
+        r = self.cli("remote-refresh", **env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # Fresh round: the status bar would not start another one.
+        (self.state / "remote.stamp").write_text(f"{int(time.time())}\n")
+
+    def ssh_calls(self):
+        return self.ssh_log.read_text().splitlines() if self.ssh_log.exists() else []
+
+    def tmux_calls(self):
+        return self.tmux_log.read_text().splitlines() if self.tmux_log.exists() else []
+
+    def unix_socket(self, name, live=True):
+        import socket
+        path = self.sockets / name
+        s = socket.socket(socket.AF_UNIX)
+        s.bind(str(path))
+        self.addCleanup(s.close)
+        if live:
+            Path(f"{path}.live").write_text("")
+        return path
+
+    def test_porcelain_lists_this_hosts_agents_only(self):
+        self.local("%1", "blocked")
+        (self.state / f"remote-{self.KEY}").write_text("working|codex|%9|x:1.1|@1|0|/r\n")
+        r = self.cli("status", "--porcelain")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "blocked|claude|%1|main:1.1|@1|0|/src/app\n")
+
+    def test_fetch_caches_the_answer_and_strip_names_agent_at_host(self):
+        self.answer("devbox", "blocked|claude|%3|main:1.2|@2|40|/src/api\n")
+        self.local("%1", "idle", "codex")
+        self.fetch()
+        self.assertEqual((self.state / "remotes").read_text(),
+                         f"{self.KEY}|devbox||devbox|\n")
+        call = self.ssh_calls()[-1]
+        self.assertIn("-o BatchMode=yes -T devbox sh -c", call)
+        self.assertTrue(call.endswith("tmux-agent status --porcelain"), call)
+        self.assertTrue((self.state / f"remote-{self.KEY}.meta").read_text().startswith("ok|"))
+        r = self.cli("strip")
+        self.assertEqual(
+            r.stdout,
+            "#[fg=red]◆ #[fg=white]claude@devbox#[default]"
+            "  #[fg=green]○ #[fg=gray]codex#[default]")
+
+    def test_unreachable_or_bare_hosts_drop_out(self):
+        self.local("%1", "idle")
+        for rc, status in ((255, "err"), (127, "noplugin")):
+            with self.subTest(status=status):
+                self.answer("devbox", "blocked|claude|%3|main:1.2|@2|0|/src\n", rc=rc)
+                self.fetch()
+                meta = (self.state / f"remote-{self.KEY}.meta").read_text()
+                self.assertTrue(meta.startswith(status + "|"), meta)
+                r = self.cli("strip")
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertNotIn("devbox", r.stdout)
+                self.assertIn("claude", r.stdout)
+
+    def test_stale_answer_drops_out(self):
+        self.answer("devbox", "blocked|claude|%3|main:1.2|@2|0|/src\n")
+        self.fetch()
+        self.assertIn("claude@devbox", self.cli("strip").stdout)
+        (self.state / f"remote-{self.KEY}.meta").write_text(f"ok|{self.now - 61}\n")
+        self.assertNotIn("claude@devbox", self.cli("strip").stdout)
+
+    def test_discovers_live_control_masters_once_each(self):
+        self.unix_socket("master-me@gpu.example:22")
+        self.unix_socket("master-me@devbox.example:22")      # already listed
+        self.unix_socket("master-me@gone.example:22", live=False)
+        # This machine, by its short name, is covered by the local scan.
+        (self.fake / "G-self").write_text(
+            f"hostname {os.uname().nodename.split('.')[0]}\nuser me\nport 22\n")
+        self.answer("me@gpu.example", "ready|codex|%4|w:1.1|@3|5|/src/ml\n")
+        self.fetch(TMUX_AGENT_REMOTE_DISCOVER="on", TMUX_AGENT_REMOTES="self devbox")
+        gpu = self.sockets / "master-me@gpu.example:22"
+        self.assertEqual((self.state / "remotes").read_text().splitlines(), [
+            f"{self.KEY}|devbox||devbox|",
+            f"me@gpu.example:22|gpu.example|{gpu}|me@gpu.example|22",
+        ])
+        fetches = [c for c in self.ssh_calls() if "--porcelain" in c]
+        self.assertIn(f"-o ConnectTimeout=3 -S {gpu} -o ControlMaster=no -p 22 "
+                      f"-o BatchMode=yes -T me@gpu.example", "\n".join(fetches))
+        r = self.cli("status", "--remote")
+        self.assertIn("codex@gpu.example", r.stdout)
+
+    def test_hosts_that_leave_are_forgotten(self):
+        self.answer("devbox", "idle|claude|%3|main:1.2|@2|0|/src\n")
+        self.fetch()
+        self.assertTrue((self.state / f"remote-{self.KEY}").exists())
+        self.fetch(TMUX_AGENT_REMOTES="")
+        self.assertFalse(list(self.state.glob("remote-*")))
+
+    def test_strip_starts_a_round_only_after_the_interval(self):
+        self.answer("devbox", "working|claude|%3|main:1.2|@2|0|/src\n")
+        (self.state / "remote.stamp").write_text(f"{self.now}\n")
+        self.cli("strip")
+        time.sleep(0.3)
+        self.assertEqual(self.ssh_calls(), [])
+        (self.state / "remote.stamp").write_text(f"{self.now - 11}\n")
+        self.cli("strip")
+        cache = self.state / f"remote-{self.KEY}"
+        self.assertTrue(wait_for(cache.exists), self.ssh_calls())
+        self.assertIn("claude@devbox", self.cli("strip").stdout)
+
+    def test_turning_remotes_off_clears_their_state(self):
+        self.answer("devbox", "working|claude|%3|main:1.2|@2|0|/src\n")
+        self.fetch()
+        self.cli("strip", TMUX_AGENT_REMOTES="")
+        left = {p.name for p in self.state.glob("remote*")}
+        self.assertEqual(left, {"remote.lock"})
+
+    def test_status_json_carries_the_host(self):
+        self.answer("devbox", "blocked|claude|%3|main:1.2|@2|7|/src/api\n")
+        self.fetch()
+        r = self.cli("status", "--json", "--remote")
+        row = json.loads(r.stdout.splitlines()[0])
+        self.assertEqual((row["host"], row["pane"], row["state"]),
+                         ("devbox", f"{self.KEY}/%3", "blocked"))
+        self.assertEqual(self.cli("status", "--json").stdout, "")
+
+    def test_attach_urgent_puts_local_before_remote_within_a_state(self):
+        self.local("%1", "blocked")
+        self.local("%2", "ready")
+        self.answer("devbox", "blocked|claude|%3|main:1.2|@2|0|/src\n")
+        self.fetch()
+        remote = f"{self.KEY}/%3"
+        for current, expected in (("%1", remote), (remote, "%2"), ("%2", "%1")):
+            with self.subTest(current=current):
+                self.tmux_replies = {f"list-windows -a -F {self.WINDOW_FMT}":
+                                     f"@7|{self.KEY}\n"}
+                (self.fake / "tmux.log").unlink(missing_ok=True)
+                self.cli("attach", "--urgent", "--from", current)
+                switched = [c.split()[-1] for c in self.tmux_calls()
+                            if c.startswith("switch-client")]
+                self.assertEqual(switched, ["@7" if expected == remote else expected])
+
+    def test_first_jump_opens_a_host_window_with_a_nested_client(self):
+        self.answer("devbox", "blocked|claude|%3|main:1.2|@2|0|/src\n")
+        self.fetch()
+        attach = (r"tmux attach-session -t %3 \; select-window -t %3 \; "
+                  r"select-pane -t %3")
+        self.tmux_replies = {
+            "display-message -p #{session_name}": "work",
+            "new-window -d -P -F #{window_id} -t work: -n @devbox ssh "
+            f"-o ConnectTimeout=3 -t devbox {attach}": "@9\n",
+        }
+        r = self.cli("attach", "--next")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        calls = self.tmux_calls()
+        self.assertIn(f"set-option -w -t @9 @tmux-agent-remote {self.KEY}", calls)
+        self.assertIn("switch-client -t @9", calls)
+        self.assertTrue(wait_for(lambda: any(c.endswith("tmux-agent seen %3")
+                                             for c in self.ssh_calls())))
+
+    def test_later_jumps_reuse_the_window_and_move_its_client(self):
+        self.answer("devbox", "blocked|claude|%3|main:1.2|@2|0|/src\n")
+        self.fetch()
+        self.tmux_replies = {f"list-windows -a -F {self.WINDOW_FMT}":
+                             f"@1|\n@7|{self.KEY}\n"}
+        r = self.cli("focus", "--pane", f"{self.KEY}/%3")
+        self.assertEqual(r.returncode, 1)          # no local client attached
+        r = self.cli("attach", "--next")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse([c for c in self.tmux_calls() if c.startswith("new-window")])
+        self.assertIn("switch-client -t @7", self.tmux_calls())
+        self.assertTrue(self.ssh_calls()[-1].endswith("tmux-agent focus --pane %3"))
+
+    def test_pick_lists_remote_agents_and_previews_them_over_ssh(self):
+        self.local("%1", "idle")
+        self.answer("devbox", "blocked|claude|%3|main:1.2|@2|0|/src/api\n")
+        self.fetch()
+        (self.fake / "fzf").write_text(
+            f'#!/bin/sh\nprintf "%s\\n" "$@" >{shlex.quote(str(self.dir / "fzf-args"))}\n'
+            f'cat >{shlex.quote(str(self.dir / "rows"))}\nexit 130\n')
+        (self.fake / "fzf").chmod(0o755)
+        self.cli("pick")
+        rows = [re.sub(r"\x1b\[[0-9;]*m", "", line).split("\t")
+                for line in (self.dir / "rows").read_text().splitlines()]
+        self.assertEqual([pane for _, pane in rows], [f"{self.KEY}/%3", "%1"])
+        self.assertIn("claude@devbox", rows[0][0])
+        self.answer("devbox", "remote pane text\n")
+        r = self.cli("read", "--pane", f"{self.KEY}/%3", "--lines", "5", "--ansi")
+        self.assertEqual(r.stdout, "remote pane text\n")
+        self.assertTrue(self.ssh_calls()[-1].endswith(
+            "tmux-agent read --pane %3 --lines 5 --ansi"))
+
+    def test_remote_transitions_notify_and_the_click_jumps_there(self):
+        self.answer("devbox", "working|claude|%3|main:1.2|@2|0|/src/api\n")
+        self.fetch()
+        notified = self.dir / "notify-send.log"
+        (self.fake / "notify-send").write_text(
+            f'#!/bin/sh\nprintf "%s\\n" "$*" >>{shlex.quote(str(notified))}\n'
+            'printf default\n')
+        (self.fake / "notify-send").chmod(0o755)
+        self.tmux_replies = {
+            "list-clients -F #{client_activity}|#{client_name}|#{client_pid}|#{session_name}":
+                "100|/dev/pts/4|4343|work\n",
+            f"list-windows -a -F {self.WINDOW_FMT}": f"@7|{self.KEY}\n",
+            "show-option -gqv @tmux-agent-raise-command": "off",
+        }
+        self.answer("devbox", "blocked|claude|%3|main:1.2|@2|0|/src/api\n")
+        env = {k: v for k, v in self.env.items() if k != "TMUX_AGENT_QUIET"}
+        self.tmux_log = fake_tmux(self.fake, self.tmux_replies)
+        subprocess.run([str(CLI), "remote-refresh"], env=env, timeout=20)
+        self.assertTrue(wait_for(lambda: "switch-client -c /dev/pts/4 -t @7"
+                                 in self.tmux_calls()), self.tmux_calls())
+        self.assertIn("claude@devbox needs input api · main:1.2", notified.read_text())
 
 
 if __name__ == "__main__":

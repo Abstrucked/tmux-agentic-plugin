@@ -84,6 +84,48 @@ alone. `install-hooks --remove` takes them out again.
 TPM installs to `~/.config/tmux/plugins/` instead of `~/.tmux/plugins/` when
 your config lives in `~/.config/tmux`. Adjust the paths above to match.
 
+### Remote agents
+
+Agents running in tmux on other machines appear next to local ones, named
+`agent@host`: in the strip, in the picker (with a live preview) and for
+`prefix + A`. When one gets blocked or finishes, you get a notification.
+
+```tmux
+set -g @tmux-agent-remotes 'devbox gpu-box'   # ssh aliases to always ask
+```
+
+On top of that list, any machine you have a live ssh ControlMaster
+connection to is picked up by itself and dropped once the connection
+closes. This needs a `ControlPath` of the form `<dir>/<prefix>%r@%h:%p`,
+for example:
+
+```ssh-config
+Host *
+    ControlMaster auto
+    ControlPath ~/.ssh/master-%r@%h:%p
+    ControlPersist 10m
+```
+
+How it works: each host runs this plugin itself. Every
+`@tmux-agent-remote-interval` seconds, the status bar starts a background
+`ssh host tmux-agent status --porcelain` for each host, reusing the
+ControlMaster connection when there is one. Nothing listens on a port, and
+your ssh keys are the only credentials. A host that can't be reached, or
+whose answer is more than six intervals old, drops out; the local strip
+never waits on ssh.
+
+Jumping to a remote agent opens a local window named `@host` running
+`ssh -t host tmux attach` on that pane's session. Later jumps reuse the
+window and move its client to the pane. The inner tmux gets its own prefix
+by pressing the prefix twice, as long as your config has
+`bind <prefix> send-prefix`.
+
+Requirements on each remote host: tmux, bash 4+ and this plugin, installed
+by TPM in the usual place. Otherwise, point `@tmux-agent-remote-command` at
+its `bin/tmux-agent`. `tailscale ssh` opens no ControlMaster connection, so
+list such hosts in `@tmux-agent-remotes`; plain `ssh` over the tailnet
+works. `tmux-agent remotes` shows each host and how its last fetch went.
+
 ### Clicking notifications
 
 Clicking a notification switches a tmux client to that agent's session,
@@ -125,6 +167,11 @@ window is one of its ancestors.
 | `@tmux-agent-strip-max`       | `4`           | agents shown by name before switching to counts |
 | `@tmux-agent-notify`          | `on`          | desktop notifications; `off` to silence |
 | `@tmux-agent-raise-command`   | detected      | raises the terminal window when a notification is clicked; a command (gets the client PID) or `off` |
+| `@tmux-agent-remotes`         | empty         | ssh aliases whose agents to show (see [Remote agents](#remote-agents)) |
+| `@tmux-agent-remote-discover` | `on`          | also ask hosts with a live ssh ControlMaster connection; `off` for the list only |
+| `@tmux-agent-remote-interval` | `10`          | seconds between fetches from remote hosts |
+| `@tmux-agent-ssh-sockets`     | `~/.ssh/master-*` | glob matching your ControlMaster sockets |
+| `@tmux-agent-remote-command`  | TPM paths     | command that runs `tmux-agent` on a remote host |
 
 Set options before the `@plugin` line runs, that is, above TPM's `run` line.
 
@@ -133,7 +180,10 @@ Set options before the `@plugin` line runs, that is, above TPM's `run` line.
 `bin/tmux-agent` is also usable on its own:
 
 ```
-tmux-agent status [--json]     list agent panes and states
+tmux-agent status [--json] [--remote]   list agent panes and states;
+                               --remote adds agents on other hosts
+tmux-agent status --porcelain  this host's agents, for other hosts to fetch
+tmux-agent remotes             remote hosts and their last fetch
 tmux-agent attach --next       jump to the most urgent agent pane
 tmux-agent attach --urgent [--from %3]   next blocked/ready pane, after %3
 tmux-agent focus --pane %3     switch a client to %3 and raise its terminal
@@ -153,7 +203,7 @@ Run `tmux-agent` with no arguments for the full list.
 ## Development
 
 ```sh
-shellcheck bin/tmux-agent lib/engine.sh lib/install-hooks tmux-agentic.tmux
+shellcheck bin/tmux-agent lib/engine.sh lib/remote.sh lib/install-hooks lib/raise tmux-agentic.tmux
 pytest tests
 ```
 

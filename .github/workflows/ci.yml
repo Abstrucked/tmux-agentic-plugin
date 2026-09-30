@@ -29,5 +29,5 @@ jobs:
         with:
           node-version: "22"
       - run: pip install pytest
-      - run: shellcheck bin/tmux-agent lib/engine.sh lib/install-hooks lib/raise tmux-agentic.tmux
+      - run: shellcheck bin/tmux-agent lib/engine.sh lib/remote.sh lib/install-hooks lib/raise tmux-agentic.tmux
       - run: pytest tests
