@@ -20,7 +20,10 @@
 #   install-hooks [--remove] [claude|codex|opencode ...]
 #                        wire the agents' hooks up (or remove them)
 #   place-strip [--max N]  centre the strip in the status bar
-#   attach --next        jump to the most urgent agent pane
+#   attach [--next|--urgent] [--from <pane>]
+#                        jump to the most urgent agent pane; --urgent only
+#                        to blocked, then ready ones (prefix + A), cycling
+#                        past --from
 #   refresh              update cached state now
 #
 # State is cached in $TMUX_AGENT_STATE_DIR (default /tmp/tmux-agent-$UID).
@@ -470,20 +473,50 @@ goto_pane() {
 }
 
 cmd_attach() {
+    # --next: most urgent agent in any state. --urgent: only agents that
+    # need you, blocked before ready. --from <pane>: the candidate after
+    # that pane, wrapping, so repeated jumps cycle through them.
+    local urgent=0 from=''
+    while (($#)); do
+        case $1 in
+        --urgent)
+            urgent=1
+            shift
+            ;;
+        --from)
+            from=${2:-}
+            shift $(($# > 1 ? 2 : 1))
+            ;;
+        *) shift ;;
+        esac
+    done
     refresh
-    local f st pane s
-    for s in blocked working ready idle; do
+    local f st pane s i
+    local -a states=(blocked working ready idle) panes=()
+    ((urgent)) && states=(blocked ready)
+    for s in "${states[@]}"; do
         for f in "$TA_STATE_DIR"/state-*; do
             [[ -e $f ]] || continue
-            pane=${f##*-}
             IFS='|' read -r st _rest <"$f" || continue
-            [[ $st == "$s" ]] || continue
-            goto_pane "$pane"
-            return 0
+            [[ $st == "$s" ]] && panes+=("${f##*-}")
         done
     done
-    echo "no agent panes" >&2
-    return 1
+    if ((${#panes[@]} == 0)); then
+        if ((urgent)); then
+            echo "no agent needs you" >&2
+        else
+            echo "no agent panes" >&2
+        fi
+        return 1
+    fi
+    pane=${panes[0]}
+    for i in "${!panes[@]}"; do
+        if [[ ${panes[i]} == "$from" ]]; then
+            pane=${panes[(i + 1) % ${#panes[@]}]}
+            break
+        fi
+    done
+    goto_pane "$pane"
 }
 
 pad() {

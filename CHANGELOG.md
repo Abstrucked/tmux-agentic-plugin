@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `prefix + A` jumps to the next agent that needs you: blocked first, then
+  finished and unseen. Pressing it again cycles through them. Rebind with
+  `@tmux-agent-urgent-key`, or turn it off with `off`.
+- `attach --urgent` limits the jump to blocked and ready agents, and
+  `attach --from <pane>` moves to the candidate after that pane.
+
 ## 0.1.0 (2026-09-30)
 
 First release as a standalone TPM plugin, extracted from

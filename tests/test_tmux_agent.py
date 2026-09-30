@@ -404,6 +404,54 @@ class CliSmokeTests(unittest.TestCase):
                           (state_dir / "tmux.log").read_text().splitlines())
             self.assertTrue((state_dir / "seen-%5").exists())
 
+    def run_attach(self, states, *args):
+        # states: pane id -> state, written as cached state files. Returns
+        # the result and the panes switch-client was sent to.
+        with tempfile.TemporaryDirectory(prefix="ta-attach-") as directory:
+            state_dir = Path(directory)
+            now = int(time.time())
+            (state_dir / "stamp").write_text(f"{now}\n")
+            for pane, state in states.items():
+                (state_dir / f"state-{pane}").write_text(
+                    f"{state}|claude|0|{now}|{now}|main:1.1|@1|/project|1\n"
+                )
+            fake = state_dir / "bin"
+            fake.mkdir()
+            log = fake_tmux(fake)
+            r = subprocess.run(
+                [str(CLI), "attach", *args], capture_output=True, text=True,
+                env={**os.environ, "TMUX_AGENT_STATE_DIR": directory,
+                     "PATH": f"{fake}:{os.environ['PATH']}"},
+            )
+            calls = log.read_text().splitlines() if log.exists() else []
+            return r, [c.split()[-1] for c in calls if c.startswith("switch-client")]
+
+    URGENT_MIX = {"%1": "working", "%2": "ready", "%3": "blocked",
+                  "%4": "idle", "%5": "blocked"}
+
+    def test_attach_urgent_prefers_blocked_and_skips_working_and_idle(self):
+        r, jumps = self.run_attach(self.URGENT_MIX, "--urgent")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(jumps, ["%3"])
+
+    def test_attach_urgent_cycles_past_the_current_pane(self):
+        for current, expected in (("%3", "%5"), ("%5", "%2"), ("%2", "%3"),
+                                  ("%1", "%3")):
+            with self.subTest(current=current):
+                _, jumps = self.run_attach(self.URGENT_MIX, "--urgent",
+                                           "--from", current)
+                self.assertEqual(jumps, [expected])
+
+    def test_attach_urgent_without_candidates_fails(self):
+        r, jumps = self.run_attach({"%1": "working", "%2": "idle"}, "--urgent")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no agent needs you", r.stderr)
+        self.assertEqual(jumps, [])
+
+    def test_attach_next_still_takes_any_state(self):
+        _, jumps = self.run_attach({"%1": "idle", "%2": "working"}, "--next")
+        self.assertEqual(jumps, ["%2"])
+
 class HookTests(unittest.TestCase):
     def state_of(self, event):
         r = bash('ta_hook_state "$1"', event)
@@ -540,6 +588,8 @@ class EntryPointTests(unittest.TestCase):
             "show-option -gqv status-right": "#[fg=blue]#{agent_status} host",
         })
         self.assertIn(f"bind-key a display-popup -E -w 80% -h 80% '{CLI}' pick", calls)
+        self.assertIn(f"bind-key A run-shell '{CLI}' attach --urgent --from '#{{pane_id}}'"
+                      " 2>/dev/null || tmux display-message 'no agent needs you'", calls)
         self.assertIn(f"set-hook -ga pane-focus-in run-shell \"'{CLI}' seen #{{pane_id}}\"",
                       calls)
         self.assertIn(f"set-option -gq status-right #[fg=blue]#('{CLI}' strip) host", calls)
@@ -548,6 +598,7 @@ class EntryPointTests(unittest.TestCase):
     def test_options_change_key_size_limit_and_position(self):
         calls = self.run_entry({
             "show-option -gqv @tmux-agent-key": "off",
+            "show-option -gqv @tmux-agent-urgent-key": "off",
             "show-option -gqv @tmux-agent-strip-position": "centre",
             "show-option -gqv @tmux-agent-strip-max": "6",
             "show -gv status-format[0]": "L#[nolist align=right R",
@@ -602,7 +653,10 @@ dispose();
         with tempfile.TemporaryDirectory(prefix="ta-oc-") as directory:
             log = Path(directory) / "calls"
             bin_ = Path(directory) / "tmux-agent"
-            bin_.write_text(f'#!/bin/sh\necho "$*" >>"{log}"\n')
+            # The first hook is slow, so hooks run concurrently would log
+            # out of order.
+            bin_.write_text('#!/bin/sh\ncase "$*" in *started) sleep 0.2 ;; esac\n'
+                            f'echo "$*" >>"{log}"\n')
             bin_.chmod(0o755)
             r = subprocess.run(
                 ["node", "--input-type=module", "-e", self.SCRIPT],

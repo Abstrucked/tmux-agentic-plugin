@@ -3,9 +3,7 @@
 See at a glance what your coding agents are doing across every tmux session,
 and jump straight to the one that needs you.
 
-```
- _dotfiles   1:nvim  2:zsh        ◆ codex  ● claude  ○ opencode          host
-```
+![Agent strip in the tmux status bar: a blocked claude named, then counts of ready and idle agents](docs/strip.png)
 
 It detects Claude Code, Codex, OpenCode, Gemini, Aider, Amp, Copilot and other
 agent CLIs running in any pane, and tracks each one's state:
@@ -22,11 +20,15 @@ agent CLIs running in any pane, and tracks each one's state:
   blocked agents named while there are at most two.
 - **Picker** (`prefix + a`): an fzf popup over every agent pane with a live
   preview. Enter switches to that pane, in any session.
+- **Jump** (`prefix + A`): straight to the next blocked agent, then to
+  finished ones you have not looked at. Press again to cycle through them.
 - **Desktop notifications** when an agent you are not looking at gets
   blocked or finishes.
 - **Exact states through agent hooks** (optional): Claude Code, Codex and
   OpenCode report their own lifecycle. Without hooks, state is inferred
   from pane output and CPU use.
+
+![Agent picker: every agent pane across sessions with its state, and a live preview of the blocked one](docs/picker.png)
 
 ## Requirements
 
@@ -85,6 +87,7 @@ your config lives in `~/.config/tmux`. Adjust the paths above to match.
 | Option                        | Default       | Effect |
 |-------------------------------|---------------|--------|
 | `@tmux-agent-key`             | `a`           | picker key after the prefix; `off` for none |
+| `@tmux-agent-urgent-key`      | `A`           | jump key after the prefix; `off` for none |
 | `@tmux-agent-popup-size`      | `80%`         | picker popup width and height |
 | `@tmux-agent-strip-position`  | `interpolate` | `interpolate`: replace `#{agent_status}` in `status-left`/`status-right`; `centre`: put the strip in the middle of the status bar; `off`: no strip |
 | `@tmux-agent-strip-max`       | `4`           | agents shown by name before switching to counts |
@@ -99,6 +102,7 @@ Set options before the `@plugin` line runs, that is, above TPM's `run` line.
 ```
 tmux-agent status [--json]     list agent panes and states
 tmux-agent attach --next       jump to the most urgent agent pane
+tmux-agent attach --urgent [--from %3]   next blocked/ready pane, after %3
 tmux-agent wait --pane %3 --state ready [--timeout 600]
 tmux-agent window-dot @1       rollup state dot, for window-status-format
 tmux-agent pane-label %3       agent + state, for pane-border-format
