@@ -1084,8 +1084,11 @@ class RemoteTests(unittest.TestCase):
         self.answer("devbox", "working|claude|%3|main:1.2|@2|0|/src\n")
         self.fetch()
         self.cli("strip", TMUX_AGENT_REMOTES="")
-        left = {p.name for p in self.state.glob("remote*")}
-        self.assertEqual(left, {"remote.lock"})
+        # Only the round's lock may stay: a flock file on Linux, nothing
+        # with macOS's mkdir lock.
+        left = {p.name for p in self.state.glob("remote*")
+                if not p.name.startswith("remote.lock")}
+        self.assertEqual(left, set())
 
     def test_status_json_carries_the_host(self):
         self.answer("devbox", "blocked|claude|%3|main:1.2|@2|7|/src/api\n")
