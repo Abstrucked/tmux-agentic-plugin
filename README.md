@@ -3,9 +3,7 @@
 See at a glance what your coding agents are doing across every tmux session,
 and jump straight to the one that needs you.
 
-```
- _dotfiles   1:nvim  2:zsh        ◆ codex  ● claude  ○ opencode          host
-```
+![Agent strip in the tmux status bar: a blocked claude named, then counts of ready and idle agents](docs/strip.png)
 
 It detects Claude Code, Codex, OpenCode, Gemini, Aider, Amp, Copilot and other
 agent CLIs running in any pane, and tracks each one's state:
@@ -29,6 +27,8 @@ agent CLIs running in any pane, and tracks each one's state:
 - **Exact states through agent hooks** (optional): Claude Code, Codex and
   OpenCode report their own lifecycle. Without hooks, state is inferred
   from pane output and CPU use.
+
+![Agent picker: every agent pane across sessions with its state, and a live preview of the blocked one](docs/picker.png)
 
 ## Requirements
 
