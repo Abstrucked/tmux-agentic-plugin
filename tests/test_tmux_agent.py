@@ -653,7 +653,10 @@ dispose();
         with tempfile.TemporaryDirectory(prefix="ta-oc-") as directory:
             log = Path(directory) / "calls"
             bin_ = Path(directory) / "tmux-agent"
-            bin_.write_text(f'#!/bin/sh\necho "$*" >>"{log}"\n')
+            # The first hook is slow, so hooks run concurrently would log
+            # out of order.
+            bin_.write_text('#!/bin/sh\ncase "$*" in *started) sleep 0.2 ;; esac\n'
+                            f'echo "$*" >>"{log}"\n')
             bin_.chmod(0o755)
             r = subprocess.run(
                 ["node", "--input-type=module", "-e", self.SCRIPT],

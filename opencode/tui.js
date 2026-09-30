@@ -42,12 +42,41 @@ const PROMPTS = new Set([
   "form.cancelled",
 ]);
 
+// Hooks run one at a time, in event order. Each one overwrites the pane's
+// reported state, so hooks racing each other could leave a stale state
+// behind, e.g. blocked after the permission prompt was already answered.
+// The agent never waits on them: the hook rescans panes in the background.
+const queue = [];
+let running = false;
+
 function report(event) {
-  // Fire and forget: the hook rescans panes in the background anyway.
+  queue.push(event);
+  if (!running) {
+    next();
+  }
+}
+
+function next() {
+  const event = queue.shift();
+  running = event !== undefined;
+  if (!running) {
+    return;
+  }
+  let done = false;
+  const advance = () => {
+    if (!done) {
+      done = true;
+      next();
+    }
+  };
   try {
-    spawn(BIN, ["hook", "opencode", event], { stdio: "ignore", detached: true }).unref();
-  } catch {
+    const child = spawn(BIN, ["hook", "opencode", event], { stdio: "ignore", detached: true });
+    child.once("exit", advance);
     // tmux-agent missing or not executable: stay out of the agent's way.
+    child.once("error", advance);
+    child.unref();
+  } catch {
+    advance();
   }
 }
 
