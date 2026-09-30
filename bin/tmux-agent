@@ -370,8 +370,9 @@ cmd_wait() {
     while :; do
         refresh
         st=''
-        [[ -f $TA_STATE_DIR/state-$pane ]] &&
+        if [[ -f $TA_STATE_DIR/state-$pane ]]; then
             IFS='|' read -r st _rest <"$TA_STATE_DIR/state-$pane" || true
+        fi
         [[ $st == "$want" ]] && return 0
         if ((timeout > 0 && waited >= timeout)); then
             return 1
