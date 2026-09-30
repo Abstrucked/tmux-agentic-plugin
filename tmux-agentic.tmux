@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# tmux-agentic-plugin -- TPM entry point. Binds the agent picker, puts the
-# agent strip in the status bar and marks agent panes as seen on focus.
+# tmux-agentic-plugin -- TPM entry point. Binds the agent picker and the
+# jump-to-urgent key, puts the agent strip in the status bar and marks agent
+# panes as seen on focus.
 #
 # Options (set before TPM runs):
 #   @tmux-agent-key             picker key after the prefix (default a, off: none)
+#   @tmux-agent-urgent-key      key after the prefix that jumps to the next
+#                               blocked, then ready agent (default A, off: none)
 #   @tmux-agent-popup-size      picker popup width and height (default 80%)
 #   @tmux-agent-strip-position  interpolate (default): replace #{agent_status}
 #                               in status-left/status-right; centre: centre
@@ -46,8 +49,9 @@ main() {
         tmux display-message "tmux-agentic-plugin needs bash 4+ (found $BASH_VERSION)"
         return 0
     fi
-    local key size position max
+    local key urgent_key size position max
     key=$(option @tmux-agent-key a)
+    urgent_key=$(option @tmux-agent-urgent-key A)
     size=$(option @tmux-agent-popup-size 80%)
     position=$(option @tmux-agent-strip-position interpolate)
     # Only pass a limit that was set, so TMUX_AGENT_STRIP_MAX still applies.
@@ -55,6 +59,11 @@ main() {
 
     if [[ $key != off ]]; then
         tmux bind-key "$key" display-popup -E -w "$size" -h "$size" "'$BIN' pick"
+    fi
+    if [[ $urgent_key != off ]]; then
+        # A message instead of tmux's "returned 1" when nothing needs you.
+        tmux bind-key "$urgent_key" run-shell \
+            "'$BIN' attach --urgent --from '#{pane_id}' 2>/dev/null || tmux display-message 'no agent needs you'"
     fi
     focus_hook
     case $position in
