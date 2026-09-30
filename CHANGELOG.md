@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Clicking a notification jumps to the agent's pane and raises its terminal
+  window, switching to its workspace or tag. Hyprland, sway, awesome and X11
+  window managers (through `xdotool` or `wmctrl`) are detected;
+  `@tmux-agent-raise-command` takes a command of your own, or `off`.
+- `focus --pane <id>` runs that jump from the command line.
+
 - `prefix + A` jumps to the next agent that needs you: blocked first, then
   finished and unseen. Pressing it again cycles through them. Rebind with
   `@tmux-agent-urgent-key`, or turn it off with `off`.

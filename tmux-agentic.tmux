@@ -13,6 +13,8 @@
 #                               of the status bar; off: no strip
 #   @tmux-agent-strip-max       agents shown by name before counting (default 4)
 #   @tmux-agent-notify          desktop notifications, on (default) or off
+#   @tmux-agent-raise-command   raises the terminal on a notification click;
+#                               detected by default (lib/raise), off: none
 #
 # Agent hooks are opt-in: run bin/tmux-agent install-hooks once.
 set -euo pipefail

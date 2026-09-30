@@ -24,11 +24,15 @@
 #                        jump to the most urgent agent pane; --urgent only
 #                        to blocked, then ready ones (prefix + A), cycling
 #                        past --from
+#   focus --pane <id>    switch a client to the pane and raise its terminal
+#                        window (what clicking a notification does)
 #   refresh              update cached state now
 #
 # State is cached in $TMUX_AGENT_STATE_DIR (default /tmp/tmux-agent-$UID).
 # tmux's status interval drives refreshes. Desktop notifications are off
-# with the tmux option @tmux-agent-notify off (or TMUX_AGENT_QUIET=1). The
+# with the tmux option @tmux-agent-notify off (or TMUX_AGENT_QUIET=1).
+# Clicking one runs focus; lib/raise finds the window (see
+# @tmux-agent-raise-command there). The
 # strip names agents up to --max (default $TMUX_AGENT_STRIP_MAX, else 4),
 # then counts them per state.
 set -euo pipefail
@@ -70,8 +74,23 @@ pane_in_view() {
     return 1
 }
 
+notify_wait() {
+    # $1 urgency, $2 pane id, $3 title, $4 body. Clicking the notification
+    # (its default action) focuses the pane. --wait holds until the
+    # notification closes; libnotify before 0.7.9 has no --wait, so fall back
+    # to a plain notification.
+    local action
+    if ! action=$(notify-send -a tmux-agent -u "$1" -A default=Show --wait "$3" "$4"); then
+        notify-send -a tmux-agent -u "$1" "$3" "$4" || true
+        return 0
+    fi
+    if [[ $action == default ]]; then
+        "$SELF" focus --pane "$2"
+    fi
+}
+
 notify() {
-    # $1 agent, $2 state, $3 tmux target, $4 working directory.
+    # $1 agent, $2 state, $3 tmux target, $4 working directory, $5 pane id.
     [[ $(tmux show-option -gqv @tmux-agent-notify 2>/dev/null) != off ]] || return 0
     local what=finished urgency=normal title body
     if [[ $2 == blocked ]]; then
@@ -80,7 +99,14 @@ notify() {
     fi
     title="$1 $what" body="${4##*/} · $3"
     if command -v notify-send >/dev/null 2>&1; then
-        notify-send -a tmux-agent -u "$urgency" "$title" "$body" 2>/dev/null || true
+        # Waits for the click in the background, off the scan lock (the
+        # child would hold it until the notification closes) and off the
+        # status job's output, which tmux reads to EOF.
+        (
+            [[ -z ${TA_LOCK_FD:-} ]] || exec {TA_LOCK_FD}>&-
+            trap '' HUP
+            notify_wait "$urgency" "$5" "$title" "$body"
+        ) </dev/null >/dev/null 2>&1 &
     elif command -v osascript >/dev/null 2>&1; then
         # Text goes in as arguments, so quotes in paths need no escaping.
         osascript -e 'on run argv' \
@@ -97,13 +123,15 @@ mark_seen() {
 refresh() {
     # Hooks refresh in the background while the status bar polls. Serialize
     # scans so a transition is seen, and notified, exactly once.
-    local lock_fd rc=0
+    # The lock fd is global so notify() can close it in its background job.
+    local rc=0
     mkdir -p "$TA_STATE_DIR"
     if command -v flock >/dev/null 2>&1; then
-        exec {lock_fd}>"$TA_STATE_DIR/lock"
-        flock "$lock_fd"
+        exec {TA_LOCK_FD}>"$TA_STATE_DIR/lock"
+        flock "$TA_LOCK_FD"
         scan "$@" || rc=$?
-        exec {lock_fd}>&-
+        exec {TA_LOCK_FD}>&-
+        TA_LOCK_FD=''
         return "$rc"
     fi
     # No flock (macOS): mkdir is atomic. A lock held past 10s was left by
@@ -197,7 +225,7 @@ scan() {
         if [[ -z ${TMUX_AGENT_QUIET:-} && -n $prev && $state != "$prev" ]] &&
             { [[ $state == blocked ]] || [[ $state == ready ]]; } &&
             ! pane_in_view "$pane"; then
-            notify "$agent" "$state" "$target" "$path"
+            notify "$agent" "$state" "$target" "$path" "$pane"
         fi
     done < <(tmux list-panes -a -F "$TA_PANE_FMT" 2>/dev/null || true)
 
@@ -460,11 +488,14 @@ cmd_place_strip() {
 }
 
 goto_pane() {
+    # $1 pane id, $2 client name (optional; default: tmux's current client).
     local pane=$1 wid
+    local -a client=()
+    [[ -z ${2:-} ]] || client=(-c "$2")
     # switch-client with a pane target changes session, window and pane at
     # once, so agents in other sessions (e.g. sessionizer ones) are reachable.
     # Without an attached client, fall back to selecting in place.
-    if ! tmux switch-client -t "$pane" 2>/dev/null; then
+    if ! tmux switch-client ${client[@]+"${client[@]}"} -t "$pane" 2>/dev/null; then
         wid=$(tmux display-message -p -t "$pane" '#{window_id}')
         tmux select-window -t "$wid"
         tmux select-pane -t "$pane"
@@ -517,6 +548,47 @@ cmd_attach() {
         fi
     done
     goto_pane "$pane"
+}
+
+pick_client() {
+    # $1 session. "name|pid" of the most recently active client on that
+    # session, else of the most recently active client anywhere.
+    local name pid session any='' on=''
+    while IFS='|' read -r _ name pid session; do
+        [[ -n $name ]] || continue
+        [[ -n $any ]] || any="$name|$pid"
+        if [[ -z $on && $session == "$1" ]]; then
+            on="$name|$pid"
+        fi
+    done < <(tmux list-clients -F '#{client_activity}|#{client_name}|#{client_pid}|#{session_name}' 2>/dev/null |
+        sort -t '|' -k1,1nr || true)
+    printf '%s' "${on:-$any}"
+}
+
+cmd_focus() {
+    # Notification click: switch a client to the pane, then raise the
+    # terminal window that client runs in (lib/raise).
+    local pane='' session client
+    while (($#)); do
+        case $1 in
+        --pane)
+            pane=${2:-}
+            shift $(($# > 1 ? 2 : 1))
+            ;;
+        *) shift ;;
+        esac
+    done
+    [[ -n $pane ]] || return 1
+    # Notifications outlive panes (swaync keeps them in its panel).
+    session=$(tmux display-message -p -t "$pane" '#{session_name}' 2>/dev/null) || return 0
+    [[ -n $session ]] || return 0
+    client=$(pick_client "$session")
+    if [[ -z $client ]]; then
+        echo "no tmux client attached" >&2
+        return 1
+    fi
+    goto_pane "$pane" "${client%%|*}"
+    "$(dirname "$SELF")/../lib/raise" "${client##*|}" </dev/null >/dev/null 2>&1 || true
 }
 
 pad() {
@@ -587,6 +659,7 @@ main() {
     place-strip) cmd_place_strip "$@" ;;
     install-hooks) "$(dirname "$SELF")/../lib/install-hooks" "$@" ;;
     attach) cmd_attach "$@" ;;
+    focus) cmd_focus "$@" ;;
     *)
         usage
         exit 1
