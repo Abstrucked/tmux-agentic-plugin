@@ -1090,7 +1090,7 @@ class RemoteTests(unittest.TestCase):
             ("old", "100.64.0.9", "linux", False, []),
             ("phone", "100.64.0.10", "android", True, []),
             ("devbox", "100.64.0.11", "linux", True, []),        # already listed
-            (os.uname().nodename.split(".")[0], "100.64.0.12", "linux", True, []))
+            (os.uname().nodename.split(".")[0].lower(), "100.64.0.12", "linux", True, []))
         (self.fake / "G-devbox").write_text(f"hostname 100.64.0.11\nuser {me}\nport 22\n")
         self.answer(f"{me}@100.64.0.7", "ready|codex|%4|w:1.1|@3|5|/src/ml\n")
         self.fetch(TMUX_AGENT_REMOTE_TAILSCALE="on")

@@ -74,10 +74,12 @@ ta_remote_enabled() {
 ta_is_self() {
     # $1 hostname. True for this machine, which the local scan covers.
     # uname, not hostname(1): Arch does not install that by default.
-    local me
+    # Names are case-insensitive: tailscale gives lowercase DNS names.
+    local me h=${1,,}
     me=$(uname -n 2>/dev/null || true)
+    me=${me,,}
     case " $me ${me%%.*} localhost 127.0.0.1 ::1 " in
-    *" $1 "* | *" ${1%%.*} "*) return 0 ;;
+    *" $h "* | *" ${h%%.*} "*) return 0 ;;
     esac
     return 1
 }
