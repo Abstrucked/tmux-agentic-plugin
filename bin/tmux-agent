@@ -32,6 +32,9 @@
 #   refresh              update cached state now
 #   remotes              list remote hosts and how their last fetch went
 #   remote-refresh       fetch every remote host's agents now
+#   watch                stream this host's agents to other hosts: lines
+#                        then "--" on every change, and every 5s (they
+#                        keep one running over ssh)
 #
 # Remote agents: hosts in @tmux-agent-remotes, plus live ssh ControlMaster
 # connections, are asked over ssh for their agents (lib/remote.sh). They
@@ -750,6 +753,26 @@ cmd_remotes() {
     done <"$TA_STATE_DIR/remotes"
 }
 
+cmd_watch() {
+    # What a remote host's watcher reads (lib/remote.sh). A frame is the
+    # porcelain lines and a "--" line, sent when the list changes apart from
+    # ages, and every 5 seconds regardless as a heartbeat. Ends with its
+    # reader: the next write fails.
+    local cur sig prev='' beat=0 now_s
+    while :; do
+        refresh
+        cur=$(porcelain)
+        sig=$(cut -d'|' -f1-5,7- <<<"$cur")
+        now_s=$(now)
+        if [[ $sig != "$prev" ]] || ((now_s - beat >= 5)); then
+            [[ -z $cur ]] || printf '%s\n' "$cur"
+            printf -- '--\n'
+            prev=$sig beat=$now_s
+        fi
+        sleep 1
+    done
+}
+
 cmd_remote_refresh() {
     # One fetch round now, unless one is already running.
     mkdir -p "$TA_STATE_DIR"
@@ -761,6 +784,8 @@ cmd_remote_refresh() {
         local fd
         exec {fd}>"$TA_STATE_DIR/remote.lock"
         flock -n "$fd" || return 0
+        # Watchers started by the round close it, or they would keep it.
+        TA_REMOTE_LOCK_FD=$fd
         ta_remote_round
         return 0
     fi
@@ -802,6 +827,7 @@ main() {
     focus) cmd_focus "$@" ;;
     remotes) cmd_remotes ;;
     remote-refresh) cmd_remote_refresh ;;
+    watch) cmd_watch ;;
     *)
         usage
         exit 1

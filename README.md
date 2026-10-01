@@ -170,6 +170,7 @@ window is one of its ancestors.
 | `@tmux-agent-remotes`         | empty         | ssh aliases whose agents to show (see [Remote agents](#remote-agents)) |
 | `@tmux-agent-remote-discover` | `on`          | also ask hosts with a live ssh ControlMaster connection; `off` for the list only |
 | `@tmux-agent-remote-tailscale` | `on`         | also ask every online Linux/macOS tailnet peer (needs `tailscale` and `jq`); hosts without tmux-agent are retried every 5 minutes and show as `noplugin` in `tmux-agent remotes` |
+| `@tmux-agent-remote-watch`    | `on`          | keep a `tmux-agent watch` running over ssh to each host that has one, so changes show within a second; hosts without it (older plugin) are polled every interval |
 | `@tmux-agent-remote-interval` | `10`          | seconds between fetches from remote hosts |
 | `@tmux-agent-ssh-sockets`     | `~/.ssh/master-*` | glob matching your ControlMaster sockets |
 | `@tmux-agent-remote-command`  | TPM paths     | command that runs `tmux-agent` on a remote host |

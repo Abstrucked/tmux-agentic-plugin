@@ -16,6 +16,10 @@
 #                      state|agent|pane|target|window|age|path
 #   remote-<key>.meta  ok|err|noplugin, then when it was fetched
 #   remote.stamp       when the last fetch round started
+#   remote-<key>.pid   pid of the host's watcher, a long-lived "tmux-agent
+#                      watch" over ssh that keeps remote-<key> current
+#                      within about a second (@tmux-agent-remote-watch)
+#   remote-<key>.nowatch  when the host last turned out to have no "watch"
 #   tailscale-known-hosts
 #                      the peers' ssh host keys, as tailscale reports them;
 #                      ssh trusts these (and only these) for tailnet peers
@@ -114,7 +118,14 @@ ta_remote_hosts() {
     # <prefix>%r@%h:%p (dotfiles: ~/.ssh/master-%r@%h:%p); the glob comes
     # from @tmux-agent-ssh-sockets.
     local alias k v host user port key glob prefix sock rest name ip
-    local -A have=()
+    local -A have=() byip=()
+    # A tailnet address counts as its peer's name, so a connection made to
+    # 100.x.y.z and one made to the name are one host, not two.
+    local peers
+    peers=$(ta_tailscale_peers)
+    while IFS=$'\t' read -r name ip; do
+        [[ -z $name || -z $ip ]] || byip[$ip]=$name
+    done <<<"$peers"
     for alias in $(ta_opt TMUX_AGENT_REMOTES @tmux-agent-remotes ''); do
         host='' user='' port=''
         while read -r k v; do
@@ -125,7 +136,7 @@ ta_remote_hosts() {
             esac
         done < <(ssh -G "$alias" 2>/dev/null || true)
         host=${host:-$alias} user=${user:-$(id -un)} port=${port:-22}
-        key="$user@$host:$port"
+        key="$user@${byip[$host]:-$host}:$port"
         ta_is_self "$host" && continue
         [[ -z ${have[$key]:-} ]] || continue
         have[$key]=1
@@ -145,13 +156,13 @@ ta_remote_hosts() {
             rest=${rest#"$prefix"}
             [[ $rest =~ ^(.+)@(.+):([0-9]+)$ ]] || continue
             user=${BASH_REMATCH[1]} host=${BASH_REMATCH[2]} port=${BASH_REMATCH[3]}
-            key="$user@$host:$port"
+            key="$user@${byip[$host]:-$host}:$port"
             ta_is_self "$host" && continue
             [[ -z ${have[$key]:-} ]] || continue
             # ControlPersist keeps a master a while after its last session.
             ssh -O check -S "$sock" "$user@$host" >/dev/null 2>&1 || continue
             have[$key]=1
-            printf '%s|%s|%s|%s|%s\n' "$key" "$host" "$sock" "$user@$host" "$port"
+            printf '%s|%s|%s|%s|%s\n' "$key" "${byip[$host]:-$host}" "$sock" "$user@$host" "$port"
         done
     fi
 
@@ -163,10 +174,10 @@ ta_remote_hosts() {
         [[ -n $name ]] || continue
         ta_is_self "$name" && continue
         key="$user@$name:22"
-        [[ -z ${have[$key]:-} && -z ${have[$user@$ip:22]:-} ]] || continue
+        [[ -z ${have[$key]:-} ]] || continue
         have[$key]=1
         printf '%s|%s||%s@%s|22\n' "$key" "$name" "$user" "${ip:-$name}"
-    done < <(ta_tailscale_peers)
+    done <<<"$peers"
 }
 
 ta_remote_known_hosts() {
@@ -224,6 +235,15 @@ ta_remote_ssh() {
         "$TA_REMOTE_DEST" "$(ta_remote_command "$@")"
 }
 
+ta_remote_ssh_stream() {
+    # $1 key, then the far tmux-agent's arguments, for a command that keeps
+    # talking: no time limit, but a dead connection ends within ~15s.
+    ta_remote_target "$1" || return 255
+    shift
+    "${TA_REMOTE_ARGV[@]}" -o BatchMode=yes -o ServerAliveInterval=5 \
+        -o ServerAliveCountMax=3 -T "$TA_REMOTE_DEST" "$(ta_remote_command "$@")"
+}
+
 ta_remote_fresh() {
     # $1 key. True when its last fetch worked and is recent enough to trust:
     # an open connection does not mean the data is current.
@@ -263,21 +283,94 @@ ta_remote_notify() {
     done <"$4"
 }
 
-ta_remote_probe_due() {
-    # $1 key. False while the host last said it has no tmux-agent and that
-    # was under five minutes ago: with every tailnet peer asked, machines
-    # that will never run it must not cost an ssh login each round.
-    local st epoch meta=$TA_STATE_DIR/remote-$1.meta
+ta_remote_watching() {
+    # $1 key. True while its watcher process runs.
+    local pid f=$TA_STATE_DIR/remote-$1.pid
+    [[ -f $f ]] && read -r pid <"$f" || return 1
+    [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+}
+
+ta_remote_unwatch() {
+    # $1 key. Stop its watcher, and the ssh it started.
+    local pid f=$TA_STATE_DIR/remote-$1.pid
+    if [[ -f $f ]] && read -r pid <"$f" && [[ $pid =~ ^[0-9]+$ ]]; then
+        pkill -P "$pid" 2>/dev/null || true
+        kill "$pid" 2>/dev/null || true
+    fi
+    rm -f "$TA_STATE_DIR/remote-$1.pid"
+}
+
+ta_remote_due() {
+    # $1 key. Whether to ask the host this round. Hosts that answered are
+    # asked every round, unless a watcher keeps their cache current; ones
+    # that failed wait a while, so that offline peers and machines that
+    # will never run tmux-agent (every tailnet peer is asked) do not cost
+    # an ssh login each round.
+    local st epoch age meta=$TA_STATE_DIR/remote-$1.meta
     [[ -f $meta ]] || return 0
     IFS='|' read -r st epoch <"$meta" || return 0
-    [[ $st == noplugin && $epoch =~ ^[0-9]+$ ]] || return 0
-    (($(date +%s) - epoch >= 300))
+    [[ $epoch =~ ^[0-9]+$ ]] || return 0
+    age=$(($(date +%s) - epoch))
+    case $st in
+    noplugin) ((age >= 300)) ;;
+    err) ((age >= 6 * $(ta_remote_interval))) ;;
+    ok)
+        ta_remote_watching "$1" || return 0
+        # A heartbeat arrives every 5s; a silent watcher is hung.
+        ((age <= 20)) && return 1
+        ta_remote_unwatch "$1"
+        ;;
+    *) return 0 ;;
+    esac
+}
+
+ta_remote_watch() {
+    # $1 key, $2 host name. Read the host's "watch" stream until it ends:
+    # each frame, lines then "--", replaces the cache like a fetch does. A
+    # stream that ends without a frame means the far side has no "watch".
+    local out=$TA_STATE_DIR/remote-$1 frame='' line got=0
+    while IFS= read -r line; do
+        if [[ $line == -- ]]; then
+            got=1
+            printf '%s' "$frame" >"$out.tmp"
+            [[ ! -f $out ]] || ta_remote_notify "$1" "$2" "$out" "$out.tmp"
+            mv "$out.tmp" "$out"
+            printf 'ok|%s\n' "$(date +%s)" >"$out.meta"
+            frame=''
+        else
+            frame+="$line"$'\n'
+        fi
+    done < <(ta_remote_ssh_stream "$1" watch 2>/dev/null)
+    ((got)) || date +%s >"$out.nowatch"
+}
+
+ta_remote_watch_start() {
+    # $1 key, $2 host name. Start the host's watcher unless one runs or the
+    # host is known to lack "watch" (retried every five minutes). It is
+    # started detached, off the round's lock, and the round does not wait
+    # for it.
+    local pidf=$TA_STATE_DIR/remote-$1.pid since=0 now_s
+    [[ $(ta_opt TMUX_AGENT_REMOTE_WATCH @tmux-agent-remote-watch on) == on ]] || return 0
+    ta_remote_watching "$1" && return 0
+    now_s=$(date +%s)
+    [[ -f $TA_STATE_DIR/remote-$1.nowatch ]] && read -r since <"$TA_STATE_DIR/remote-$1.nowatch"
+    [[ $since =~ ^[0-9]+$ ]] || since=0
+    ((now_s - since >= 300)) || return 0
+    (
+        (
+            [[ -z ${TA_REMOTE_LOCK_FD:-} ]] || exec {TA_REMOTE_LOCK_FD}>&-
+            trap '' HUP
+            ta_remote_watch "$1" "$2"
+            rm -f "$pidf"
+        ) </dev/null >/dev/null 2>&1 &
+        printf '%s\n' "$!" >"$pidf"
+    )
 }
 
 ta_remote_fetch() {
     # $1 key, $2 host name. Ask the host for its agents and cache the answer.
     local out=$TA_STATE_DIR/remote-$1 rc=0 st=ok
-    ta_remote_probe_due "$1" || return 0
+    ta_remote_due "$1" || return 0
     ta_remote_ssh "$1" status --porcelain >"$out.tmp" 2>/dev/null || rc=$?
     case $rc in
     0) ;;
@@ -291,6 +384,7 @@ ta_remote_fetch() {
         rm -f "$out.tmp"
     fi
     printf '%s|%s\n' "$st" "$(date +%s)" >"$out.meta"
+    [[ $st != ok ]] || ta_remote_watch_start "$1" "$2"
 }
 
 ta_remote_round() {
@@ -311,12 +405,22 @@ ta_remote_round() {
         base=${f#"$TA_STATE_DIR"/remote-}
         base=${base%.meta}
         base=${base%.tmp}
-        [[ -n ${listed[$base]:-} ]] || rm -f "$f"
+        base=${base%.pid}
+        base=${base%.nowatch}
+        [[ -n ${listed[$base]:-} ]] && continue
+        [[ $f != *.pid ]] || ta_remote_unwatch "$base"
+        rm -f "$f"
     done
 }
 
 ta_remote_clear() {
     # Forget every host: remotes were turned off.
+    local f
+    for f in "$TA_STATE_DIR"/remote-*.pid; do
+        [[ -e $f ]] || continue
+        f=${f#"$TA_STATE_DIR"/remote-}
+        ta_remote_unwatch "${f%.pid}"
+    done
     rm -f "$TA_STATE_DIR"/remote-* "$TA_STATE_DIR/remotes" "$TA_STATE_DIR/remote.stamp"
 }
 

@@ -27,6 +27,7 @@ ENTRY = ROOT / "tmux-agentic.tmux"
 os.environ.setdefault("TMUX_AGENT_REMOTES", "")
 os.environ.setdefault("TMUX_AGENT_REMOTE_DISCOVER", "off")
 os.environ.setdefault("TMUX_AGENT_REMOTE_TAILSCALE", "off")
+os.environ.setdefault("TMUX_AGENT_REMOTE_WATCH", "off")
 
 
 def bash(script, *args, env=None):
@@ -961,6 +962,7 @@ class RemoteTests(unittest.TestCase):
             "TMUX_AGENT_REMOTES": "devbox",
             "TMUX_AGENT_REMOTE_DISCOVER": "off",
             "TMUX_AGENT_REMOTE_TAILSCALE": "off",
+            "TMUX_AGENT_REMOTE_WATCH": "off",
             "TMUX_AGENT_SSH_SOCKETS": f"{self.sockets}/master-*",
             "TMUX_AGENT_REMOTE_INTERVAL": "10",
         }
@@ -1029,6 +1031,7 @@ class RemoteTests(unittest.TestCase):
         for rc, status in ((255, "err"), (127, "noplugin")):
             with self.subTest(status=status):
                 self.answer("devbox", "blocked|claude|%3|main:1.2|@2|0|/src\n", rc=rc)
+                (self.state / f"remote-{self.KEY}.meta").unlink(missing_ok=True)
                 self.fetch()
                 meta = (self.state / f"remote-{self.KEY}.meta").read_text()
                 self.assertTrue(meta.startswith(status + "|"), meta)
@@ -1092,7 +1095,7 @@ class RemoteTests(unittest.TestCase):
         self.answer(f"{me}@100.64.0.7", "ready|codex|%4|w:1.1|@3|5|/src/ml\n")
         self.fetch(TMUX_AGENT_REMOTE_TAILSCALE="on")
         self.assertEqual((self.state / "remotes").read_text().splitlines(), [
-            f"{me}@100.64.0.11:22|devbox||devbox|",
+            f"{me}@devbox:22|devbox||devbox|",   # key by peer name
             f"{me}@gpu:22|gpu||{me}@100.64.0.7|22",
             f"{me}@mac:22|mac||{me}@100.64.0.8|22",
         ])
@@ -1115,6 +1118,16 @@ class RemoteTests(unittest.TestCase):
         self.assertEqual(lines, [
             f"{me}@gpu:22|gpu|{self.sockets}/master-{me}@gpu:22|{me}@gpu|22"])
 
+    def test_a_peer_reached_by_address_and_by_name_is_one_host(self):
+        me = getpass.getuser()
+        self.tailnet(("gpu", "100.64.0.7", "linux", True, []))
+        by_ip = self.unix_socket(f"master-{me}@100.64.0.7:22")
+        self.unix_socket(f"master-{me}@gpu:22")
+        self.fetch(TMUX_AGENT_REMOTE_TAILSCALE="on", TMUX_AGENT_REMOTE_DISCOVER="on",
+                   TMUX_AGENT_REMOTES="")
+        self.assertEqual((self.state / "remotes").read_text().splitlines(), [
+            f"{me}@gpu:22|gpu|{by_ip}|{me}@100.64.0.7|22"])
+
     def test_tailscale_off_or_missing_lists_nothing(self):
         self.tailnet(("gpu", "100.64.0.7", "linux", True, []))
         self.fetch(TMUX_AGENT_REMOTES="")
@@ -1135,6 +1148,68 @@ class RemoteTests(unittest.TestCase):
         self.fetch()
         self.assertEqual(len([c for c in self.ssh_calls() if "--porcelain" in c]), 2)
         self.assertIn("install tmux-agentic-plugin there", self.cli("remotes").stdout)
+
+    def fetches(self):
+        return [c for c in self.ssh_calls() if "--porcelain" in c]
+
+    def test_failing_hosts_wait_six_intervals_before_the_next_try(self):
+        self.answer("devbox", "", rc=255)
+        self.fetch()
+        self.fetch()
+        self.assertEqual(len(self.fetches()), 1)
+        meta = self.state / f"remote-{self.KEY}.meta"
+        meta.write_text(f"err|{self.now - 61}\n")
+        self.fetch()
+        self.assertEqual(len(self.fetches()), 2)
+
+    def test_the_watcher_streams_frames_into_the_cache(self):
+        self.answer("devbox", "blocked|claude|%3|main:1.2|@2|40|/src/api\n--\n")
+        self.fetch(TMUX_AGENT_REMOTE_WATCH="on")
+        pid = self.state / f"remote-{self.KEY}.pid"
+        self.assertTrue(wait_for(lambda: not pid.exists()), self.ssh_calls())
+        watches = [c for c in self.ssh_calls() if c.endswith("tmux-agent watch")]
+        self.assertEqual(len(watches), 1, self.ssh_calls())
+        self.assertIn("-o BatchMode=yes -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -T devbox", watches[0])
+        self.assertIn("claude@devbox", self.cli("strip").stdout)
+        self.assertFalse((self.state / f"remote-{self.KEY}.nowatch").exists())
+
+    def test_hosts_without_watch_are_polled_and_not_asked_again_for_five_minutes(self):
+        self.answer("devbox", "idle|claude|%3|main:1.2|@2|0|/src\n")   # no "--" frame
+        self.fetch(TMUX_AGENT_REMOTE_WATCH="on")
+        nowatch = self.state / f"remote-{self.KEY}.nowatch"
+        self.assertTrue(wait_for(nowatch.exists), self.ssh_calls())
+        self.assertIn("claude@devbox", self.cli("strip").stdout)       # polling still works
+        self.fetch(TMUX_AGENT_REMOTE_WATCH="on")
+        time.sleep(0.3)
+        self.assertEqual(len([c for c in self.ssh_calls() if c.endswith("watch")]), 1)
+
+    def test_a_live_watcher_replaces_polling_and_a_silent_one_is_replaced(self):
+        sleeper = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(sleeper.kill)
+        (self.state / f"remote-{self.KEY}.pid").write_text(f"{sleeper.pid}\n")
+        meta = self.state / f"remote-{self.KEY}.meta"
+        meta.write_text(f"ok|{int(time.time())}\n")
+        self.fetch(TMUX_AGENT_REMOTE_WATCH="on")
+        self.assertEqual([c for c in self.ssh_calls() if not c.startswith("-G")], [])
+        meta.write_text(f"ok|{int(time.time()) - 21}\n")           # no heartbeat
+        self.answer("devbox", "idle|claude|%3|main:1.2|@2|0|/src\n")
+        self.fetch(TMUX_AGENT_REMOTE_WATCH="on")
+        self.assertEqual(len(self.fetches()), 1)
+        self.assertTrue(wait_for(lambda: sleeper.poll() is not None))
+
+    def test_watch_command_streams_frames_and_a_heartbeat(self):
+        self.local("%1", "blocked")
+        self.env["TMUX_AGENT_STATE_DIR"] = str(self.state)
+        self.tmux_log = fake_tmux(self.fake, self.tmux_replies)
+        p = subprocess.Popen([str(CLI), "watch"], stdout=subprocess.PIPE, text=True, env=self.env)
+        self.addCleanup(p.kill)
+        first = [p.stdout.readline(), p.stdout.readline()]
+        self.assertEqual(first, ["blocked|claude|%1|main:1.1|@1|0|/src/app\n", "--\n"])
+        # Nothing changed: the next frame is the 5s heartbeat.
+        t = time.time()
+        again = [p.stdout.readline(), p.stdout.readline()]
+        self.assertEqual(again[1], "--\n")
+        self.assertGreaterEqual(time.time() - t, 3)
 
     def test_hosts_that_leave_are_forgotten(self):
         self.answer("devbox", "idle|claude|%3|main:1.2|@2|0|/src\n")
