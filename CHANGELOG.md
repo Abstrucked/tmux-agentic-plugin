@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Agents on other machines show up next to local ones, as `claude@devbox`,
+  in the strip, the picker and `prefix + A`, and notify when they get
+  blocked or finish. Hosts are the ssh aliases in `@tmux-agent-remotes`,
+  plus any machine you have a live ssh ControlMaster connection to. Each
+  host is asked over ssh; nothing listens on a port. Jumping to a remote
+  agent opens a window with a nested tmux client on that host, and later
+  jumps reuse it.
+- `status --porcelain` lists this host's agents for other hosts to fetch;
+  `status --remote` adds remote agents; `remotes` shows each host's last
+  fetch.
+
 - Clicking a notification jumps to the agent's pane and raises its terminal
   window, switching to its workspace or tag. Hyprland, sway, awesome and X11
   window managers (through `xdotool` or `wmctrl`) are detected;

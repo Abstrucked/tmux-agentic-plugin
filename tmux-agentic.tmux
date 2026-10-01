@@ -15,6 +15,21 @@
 #   @tmux-agent-notify          desktop notifications, on (default) or off
 #   @tmux-agent-raise-command   raises the terminal on a notification click;
 #                               detected by default (lib/raise), off: none
+#   @tmux-agent-remotes         ssh aliases whose agents to show too
+#   @tmux-agent-remote-discover also ask hosts with a live ssh ControlMaster
+#                               connection, on (default) or off
+#   @tmux-agent-remote-tailscale also ask every online Linux/macOS peer of the
+#                               tailnet (needs tailscale and jq), on (default)
+#                               or off
+#   @tmux-agent-remote-watch    keep a "tmux-agent watch" running over ssh to each
+#                               host that has one, for updates within a second
+#                               instead of every interval, on (default) or off
+#   @tmux-agent-remote-interval seconds between remote fetches (default 10)
+#   @tmux-agent-ssh-sockets     ControlMaster socket glob (~/.ssh/master-*)
+#   @tmux-agent-remote-command  runs tmux-agent on a remote host (default:
+#                               looks in TPM's plugin directories)
+# The remote options are read on every refresh, so they apply without a
+# reload.
 #
 # Agent hooks are opt-in: run bin/tmux-agent install-hooks once.
 set -euo pipefail

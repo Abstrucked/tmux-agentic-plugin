@@ -11,7 +11,10 @@
 #   window-dot <win_id>  rollup state dot for a window status entry
 #   pane-label <pane_id> agent + state label for pane-border-format
 #   seen <pane_id>       mark the pane's state as seen (pane-focus-in hook)
-#   status [--json]      list agent panes and states
+#   status [--json] [--remote]   list agent panes and states; --remote
+#                        adds agents on other hosts
+#   status --porcelain   this host's agents as state|agent|pane|target|
+#                        window|age|path (what other hosts fetch)
 #   pick                 fuzzy finder over agent panes (prefix + a)
 #   read --pane <id> [--lines N] [--ansi]   pane snapshot for fzf previews
 #   wait --pane <id> --state <state> [--timeout SEC]
@@ -27,6 +30,17 @@
 #   focus --pane <id>    switch a client to the pane and raise its terminal
 #                        window (what clicking a notification does)
 #   refresh              update cached state now
+#   remotes              list remote hosts and how their last fetch went
+#   remote-refresh       fetch every remote host's agents now
+#   watch                stream this host's agents to other hosts: lines
+#                        then "--" on every change, and every 5s (they
+#                        keep one running over ssh)
+#
+# Remote agents: hosts in @tmux-agent-remotes, plus live ssh ControlMaster
+# connections, are asked over ssh for their agents (lib/remote.sh). They
+# show up everywhere local ones do, as agent@host, and jumping to one opens
+# a window with a nested tmux client on that host. Pane arguments take
+# "<key>/<pane>" ids for them.
 #
 # State is cached in $TMUX_AGENT_STATE_DIR (default /tmp/tmux-agent-$UID).
 # tmux's status interval drives refreshes. Desktop notifications are off
@@ -40,6 +54,8 @@ set -euo pipefail
 SELF="$(readlink -f "$0")"
 # shellcheck source=../lib/engine.sh
 . "$(dirname "$SELF")/../lib/engine.sh"
+# shellcheck source=../lib/remote.sh
+. "$(dirname "$SELF")/../lib/remote.sh"
 
 declare -r TA_STATE_DIR="${TMUX_AGENT_STATE_DIR:-${TMPDIR:-/tmp}/tmux-agent-$(id -u)}"
 declare -r TA_PANE_FMT='#{pane_id}|#{pane_pid}|#{window_id}|#{session_name}:#{window_index}.#{pane_index}|#{pane_current_path}'
@@ -236,6 +252,27 @@ scan() {
     done
 }
 
+each_agent() {
+    # Every agent, most urgent first and local before remote within a
+    # state: "state|agent|host|target|age|id|path". Local agents have no
+    # host and a pane id; remote ones have the host's name and a
+    # "<key>/<pane>" id (see lib/remote.sh). --local leaves remote ones out.
+    local local_only=0 now_s s f st ag ch tgt path remote=''
+    [[ ${1:-} == --local ]] && local_only=1
+    now_s=$(now)
+    ((local_only)) || remote=$(ta_remote_agents)
+    for s in blocked working ready idle; do
+        for f in "$TA_STATE_DIR"/state-*; do
+            [[ -e $f ]] || continue
+            IFS='|' read -r st ag _ ch _ tgt _ path _ <"$f" || continue
+            [[ $st == "$s" ]] || continue
+            [[ $ch =~ ^[0-9]+$ ]] || ch=$now_s
+            printf '%s|%s||%s|%s|%s|%s\n' "$st" "$ag" "$tgt" "$((now_s - ch))" "${f##*-}" "$path"
+        done
+        [[ -z $remote ]] || grep "^$s|" <<<"$remote" || true
+    done
+}
+
 strip_item() {
     # $1 state, $2 agent name or count. Coloured state mark, then the label:
     # white, or gray once idle so settled agents step back. Names get a space
@@ -271,18 +308,14 @@ strip() {
     local max
     max=$(strip_max "$@")
     refresh
-    local f st ag s i out=''
+    ta_remote_tick
+    local st ag host s i out=''
     local -a sts=() ags=()
     local -A n=()
-    for s in blocked working ready idle; do
-        for f in "$TA_STATE_DIR"/state-*; do
-            [[ -e $f ]] || continue
-            IFS='|' read -r st ag _rest <"$f" || continue
-            [[ $st == "$s" ]] || continue
-            sts+=("$st") ags+=("$ag")
-            n[$st]=$((${n[$st]:-0} + 1))
-        done
-    done
+    while IFS='|' read -r st ag host _; do
+        sts+=("$st") ags+=("$ag${host:+@$host}")
+        n[$st]=$((${n[$st]:-0} + 1))
+    done < <(each_agent)
     if ((${#sts[@]} <= max)); then
         for i in "${!sts[@]}"; do
             out="$out${out:+  }$(strip_item "${sts[i]}" "${ags[i]}")"
@@ -329,30 +362,51 @@ pane_label() {
     printf ' #[fg=%s]%s %s · %s ' "$(ta_state_color "$st")" "$(ta_agent_glyph "$ag")" "$ag" "$st"
 }
 
-cmd_status() {
-    local json=0
-    [[ ${1:-} == --json ]] && json=1
-    refresh
-    local f st ag cpu ch up tgt wid path pane age s
+porcelain() {
+    # This host's agents, one per line: state|agent|pane|target|window|age|
+    # path. What other hosts fetch over ssh, so no jq or colour, and never
+    # remote agents (two hosts listing each other must not loop).
+    local f st ag ch up tgt wid path s
     for s in blocked working ready idle; do
         for f in "$TA_STATE_DIR"/state-*; do
             [[ -e $f ]] || continue
-            pane=${f##*-}
-            IFS='|' read -r st ag cpu ch up tgt wid path _hash <"$f" || continue
+            IFS='|' read -r st ag _ ch up tgt wid path _ <"$f" || continue
             [[ $st == "$s" ]] || continue
-            age=$((up - ch))
-            if ((json)); then
-                jq -cn --arg pane "$pane" --arg state "$st" --arg agent "$ag" \
-                    --arg target "$tgt" --arg window "$wid" --arg path "$path" \
-                    --argjson age "$age" \
-                    '{pane:$pane,state:$state,agent:$agent,target:$target,window:$window,path:$path,age:$age}'
-            else
-                printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-                    "$(ta_state_mark "$st")" \
-                    "$ag" "${path##*/}" "$tgt" "$(age_str "$age")" "$pane"
-            fi
+            [[ $ch =~ ^[0-9]+$ && $up =~ ^[0-9]+$ ]] || ch=0 up=0
+            printf '%s|%s|%s|%s|%s|%s|%s\n' "$st" "$ag" "${f##*-}" "$tgt" "$wid" "$((up - ch))" "$path"
         done
     done
+}
+
+cmd_status() {
+    local json=0 scope=--local
+    while (($#)); do
+        case $1 in
+        --json) json=1 ;;
+        --remote) scope='' ;;
+        --porcelain)
+            refresh
+            porcelain
+            return 0
+            ;;
+        esac
+        shift
+    done
+    refresh
+    local st ag host tgt age id path
+    while IFS='|' read -r st ag host tgt age id path; do
+        if ((json)); then
+            jq -cn --arg pane "$id" --arg state "$st" --arg agent "$ag" \
+                --arg target "$tgt" --arg path "$path" --arg host "$host" \
+                --argjson age "$age" \
+                '{pane:$pane,state:$state,agent:$agent,target:$target,path:$path,age:$age}
+                 + if $host == "" then {} else {host:$host} end'
+        else
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$(ta_state_mark "$st")" \
+                "$ag${host:+@$host}" "${path##*/}" "$tgt" "$(age_str "$age")" "$id"
+        fi
+    done < <(each_agent $scope)
 }
 
 cmd_read() {
@@ -374,6 +428,12 @@ cmd_read() {
         *) shift ;;
         esac
     done
+    if [[ $pane == */* ]]; then
+        local -a args=(read --pane "${pane#*/}" --lines "$lines")
+        ((ansi)) && args+=(--ansi)
+        ta_remote_ssh "${pane%%/*}" "${args[@]}" 2>/dev/null || true
+        return 0
+    fi
     local -a opts=(-p -J -S "-$((lines * 2))" -t "$pane")
     ((ansi)) && opts+=(-e)
     tmux capture-pane "${opts[@]}" 2>/dev/null | tail_lines "$lines" || true
@@ -487,10 +547,53 @@ cmd_place_strip() {
     fi
 }
 
+goto_remote() {
+    # $1 "<key>/<pane>", $2 client name (optional). Each host gets one local
+    # window, tagged @tmux-agent-remote, running a nested tmux client over
+    # ssh. The first jump opens it attached to the pane's session; later
+    # ones reuse it and have the far tmux-agent move that client to the pane.
+    local key=${1%%/*} pane=${1#*/} wid='' w tag session
+    local -a client=() target=()
+    [[ -z ${2:-} ]] || client=(-c "$2")
+    ta_remote_target "$key" || {
+        echo "unknown remote host: $key" >&2
+        return 1
+    }
+    while IFS='|' read -r w tag; do
+        if [[ $tag == "$key" ]]; then
+            wid=$w
+            break
+        fi
+    done < <(tmux list-windows -a -F '#{window_id}|#{@tmux-agent-remote}' 2>/dev/null || true)
+    if [[ -n $wid ]]; then
+        ta_remote_ssh "$key" focus --pane "$pane" >/dev/null 2>&1 || true
+    else
+        if session=$(tmux display-message -p ${client[@]+"${client[@]}"} '#{session_name}' 2>/dev/null) &&
+            [[ -n $session ]]; then
+            target=(-t "$session:")
+        fi
+        # A pane id names its session, so attach needs no lookup first.
+        wid=$(tmux new-window -d -P -F '#{window_id}' ${target[@]+"${target[@]}"} \
+            -n "@$TA_REMOTE_NAME" "${TA_REMOTE_ARGV[@]}" -t "$TA_REMOTE_DEST" \
+            "tmux attach-session -t $pane \\; select-window -t $pane \\; select-pane -t $pane") ||
+            return 1
+        [[ -n $wid ]] || return 1
+        tmux set-option -w -t "$wid" @tmux-agent-remote "$key"
+        (ta_remote_ssh "$key" seen "$pane" || true) </dev/null >/dev/null 2>&1 &
+    fi
+    tmux switch-client ${client[@]+"${client[@]}"} -t "$wid" 2>/dev/null ||
+        tmux select-window -t "$wid"
+}
+
 goto_pane() {
-    # $1 pane id, $2 client name (optional; default: tmux's current client).
+    # $1 pane id, or "<key>/<pane>" for a remote agent; $2 client name
+    # (optional; default: tmux's current client).
     local pane=$1 wid
     local -a client=()
+    if [[ $pane == */* ]]; then
+        goto_remote "$@"
+        return
+    fi
     [[ -z ${2:-} ]] || client=(-c "$2")
     # switch-client with a pane target changes session, window and pane at
     # once, so agents in other sessions (e.g. sessionizer ones) are reachable.
@@ -522,16 +625,11 @@ cmd_attach() {
         esac
     done
     refresh
-    local f st pane s i
-    local -a states=(blocked working ready idle) panes=()
-    ((urgent)) && states=(blocked ready)
-    for s in "${states[@]}"; do
-        for f in "$TA_STATE_DIR"/state-*; do
-            [[ -e $f ]] || continue
-            IFS='|' read -r st _rest <"$f" || continue
-            [[ $st == "$s" ]] && panes+=("${f##*-}")
-        done
-    done
+    local st id pane i
+    local -a panes=()
+    while IFS='|' read -r st _ _ _ _ id _; do
+        [[ $urgent == 0 || $st == blocked || $st == ready ]] && panes+=("$id")
+    done < <(each_agent)
     if ((${#panes[@]} == 0)); then
         if ((urgent)); then
             echo "no agent needs you" >&2
@@ -579,9 +677,14 @@ cmd_focus() {
         esac
     done
     [[ -n $pane ]] || return 1
-    # Notifications outlive panes (swaync keeps them in its panel).
-    session=$(tmux display-message -p -t "$pane" '#{session_name}' 2>/dev/null) || return 0
-    [[ -n $session ]] || return 0
+    if [[ $pane == */* ]]; then
+        # A remote agent: its window can be in any session.
+        session=''
+    else
+        # Notifications outlive panes (swaync keeps them in its panel).
+        session=$(tmux display-message -p -t "$pane" '#{session_name}' 2>/dev/null) || return 0
+        [[ -n $session ]] || return 0
+    fi
     client=$(pick_client "$session")
     if [[ -z $client ]]; then
         echo "no tmux client attached" >&2
@@ -599,18 +702,12 @@ pad() {
 
 cmd_pick() {
     refresh
-    local f st ag cpu ch up tgt wid path pane s i
+    local st ag host tgt age id path i
     local -a sts=() ags=() dirs=() tgts=() ages=() panes=()
-    for s in blocked working ready idle; do
-        for f in "$TA_STATE_DIR"/state-*; do
-            [[ -e $f ]] || continue
-            pane=${f##*-}
-            IFS='|' read -r st ag cpu ch up tgt wid path _hash <"$f" || continue
-            [[ $st == "$s" ]] || continue
-            sts+=("$st") ags+=("$ag") dirs+=("${path##*/}") tgts+=("$tgt") panes+=("$pane")
-            ages+=("$(age_str "$(($(now) - ch))")")
-        done
-    done
+    while IFS='|' read -r st ag host tgt age id path; do
+        sts+=("$st") ags+=("$ag${host:+@$host}") dirs+=("${path##*/}") tgts+=("$tgt")
+        panes+=("$id") ages+=("$(age_str "$age")")
+    done < <(each_agent)
     if ((${#panes[@]} == 0)); then
         echo "no agent panes" >&2
         return 1
@@ -634,6 +731,74 @@ cmd_pick() {
         --preview "$SELF read --pane {2} --lines 20 --ansi" \
         --preview-window 'right,60%,border-left') || return 0
     goto_pane "${sel##*$'\t'}"
+}
+
+cmd_remotes() {
+    # One line per host: name, key, how it was found, last fetch and age,
+    # agent count.
+    refresh
+    local k name sock st epoch n meta
+    [[ -f $TA_STATE_DIR/remotes ]] || cmd_remote_refresh
+    [[ -f $TA_STATE_DIR/remotes ]] || return 0
+    while IFS='|' read -r k name sock _; do
+        [[ -n $k ]] || continue
+        st=pending epoch=$(now) n=0
+        meta=$TA_STATE_DIR/remote-$k.meta
+        [[ -f $meta ]] && IFS='|' read -r st epoch <"$meta"
+        [[ -f $TA_STATE_DIR/remote-$k ]] && n=$(grep -c . "$TA_STATE_DIR/remote-$k" || true)
+        printf '%s\t%s\t%s\t%s %s ago\t%s agents%s\n' "$name" "$k" \
+            "$([[ -n $sock ]] && echo connected || echo listed)" \
+            "$st" "$(age_str "$(($(now) - epoch))")" "$n" \
+            "$([[ $st == noplugin ]] && echo ' (install tmux-agentic-plugin there)')"
+    done <"$TA_STATE_DIR/remotes"
+}
+
+cmd_watch() {
+    # What a remote host's watcher reads (lib/remote.sh). A frame is the
+    # porcelain lines and a "--" line, sent when the list changes apart from
+    # ages, and every 5 seconds regardless as a heartbeat. Ends with its
+    # reader: the next write fails.
+    local cur sig prev='' beat=0 now_s
+    while :; do
+        refresh
+        cur=$(porcelain)
+        sig=$(cut -d'|' -f1-5,7- <<<"$cur")
+        now_s=$(now)
+        if [[ $sig != "$prev" ]] || ((now_s - beat >= 5)); then
+            [[ -z $cur ]] || printf '%s\n' "$cur"
+            printf -- '--\n'
+            prev=$sig beat=$now_s
+        fi
+        sleep 1
+    done
+}
+
+cmd_remote_refresh() {
+    # One fetch round now, unless one is already running.
+    mkdir -p "$TA_STATE_DIR"
+    if ! ta_remote_enabled; then
+        ta_remote_clear
+        return 0
+    fi
+    if command -v flock >/dev/null 2>&1; then
+        local fd
+        exec {fd}>"$TA_STATE_DIR/remote.lock"
+        flock -n "$fd" || return 0
+        # Watchers started by the round close it, or they would keep it.
+        TA_REMOTE_LOCK_FD=$fd
+        ta_remote_round
+        return 0
+    fi
+    # No flock (macOS): mkdir is atomic. A lock older than two minutes was
+    # left by a killed round.
+    local lock=$TA_STATE_DIR/remote.lock.d
+    if ! mkdir "$lock" 2>/dev/null; then
+        [[ -n $(find "$lock" -maxdepth 0 -mmin +2 2>/dev/null) ]] || return 0
+        rmdir "$lock" 2>/dev/null || true
+        mkdir "$lock" 2>/dev/null || return 0
+    fi
+    ta_remote_round || true
+    rmdir "$lock" 2>/dev/null || true
 }
 
 usage() {
@@ -660,6 +825,9 @@ main() {
     install-hooks) "$(dirname "$SELF")/../lib/install-hooks" "$@" ;;
     attach) cmd_attach "$@" ;;
     focus) cmd_focus "$@" ;;
+    remotes) cmd_remotes ;;
+    remote-refresh) cmd_remote_refresh ;;
+    watch) cmd_watch ;;
     *)
         usage
         exit 1
