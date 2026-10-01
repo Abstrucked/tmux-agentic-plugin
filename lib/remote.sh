@@ -7,12 +7,18 @@
 # and ssh keys are the only credentials. Hosts are the ssh aliases in
 # @tmux-agent-remotes plus, with @tmux-agent-remote-discover on (the
 # default), every live ssh ControlMaster connection, so a machine you are
-# connected to shows up by itself. Files in $TA_STATE_DIR:
+# connected to shows up by itself. With @tmux-agent-remote-tailscale on (the
+# default) every online Linux/macOS peer of the tailnet is asked too, so
+# nothing needs listing: hosts that run no tmux-agent drop out as "noplugin"
+# and are only retried now and then. Files in $TA_STATE_DIR:
 #   remotes            key|name|socket|destination|port, one line per host
 #   remote-<key>       the host's last answer, one agent per line:
 #                      state|agent|pane|target|window|age|path
 #   remote-<key>.meta  ok|err|noplugin, then when it was fetched
 #   remote.stamp       when the last fetch round started
+#   tailscale-known-hosts
+#                      the peers' ssh host keys, as tailscale reports them;
+#                      ssh trusts these (and only these) for tailnet peers
 # A host's key is user@hostname:port, so an alias and a live connection to
 # the same machine count once.
 #
@@ -57,7 +63,8 @@ ta_remote_interval() {
 ta_remote_enabled() {
     # True when there are hosts to list or connections to discover.
     [[ -n $(ta_opt TMUX_AGENT_REMOTES @tmux-agent-remotes '') ]] ||
-        [[ $(ta_opt TMUX_AGENT_REMOTE_DISCOVER @tmux-agent-remote-discover on) == on ]]
+        [[ $(ta_opt TMUX_AGENT_REMOTE_DISCOVER @tmux-agent-remote-discover on) == on ]] ||
+        [[ $(ta_opt TMUX_AGENT_REMOTE_TAILSCALE @tmux-agent-remote-tailscale on) == on ]]
 }
 
 ta_is_self() {
@@ -71,13 +78,42 @@ ta_is_self() {
     return 1
 }
 
+ta_tailscale_peers() {
+    # name<TAB>ip for every online Linux/macOS peer of the tailnet; nothing
+    # when tailscale or jq is missing or the daemon is down. Also rewrites
+    # $TA_STATE_DIR/tailscale-known-hosts from the peers' ssh host keys, so
+    # ssh can check them by their tailnet address without anyone having run
+    # "tailscale configure ssh".
+    [[ $(ta_opt TMUX_AGENT_REMOTE_TAILSCALE @tmux-agent-remote-tailscale on) == on ]] || return 0
+    command -v tailscale >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 0
+    local json known=$TA_STATE_DIR/tailscale-known-hosts
+    local -a limit=()
+    command -v timeout >/dev/null 2>&1 && limit=(timeout 5)
+    json=$(${limit[@]+"${limit[@]}"} tailscale status --json 2>/dev/null) || return 0
+    # shellcheck disable=SC2016 # jq program
+    local peers='[(.Peer // {})[] | select(.Online == true)
+        | select(((.OS // "") | ascii_downcase) as $os | ["linux", "macos", "darwin", "freebsd"] | index($os))
+        | {name: ((.DNSName // "") | split(".")[0] | ascii_downcase),
+           ip: ((.TailscaleIPs // []) | map(select(contains("."))) | .[0] // ""),
+           keys: (.sshHostKeys // [])}
+        | select(.name != "")]'
+    jq -r "$peers | .[] | [.name, .ip] | @tsv" <<<"$json" 2>/dev/null || return 0
+    jq -r "$peers | .[] | . as \$p | \$p.keys[] | \"\([\$p.ip, \$p.name] | map(select(. != \"\")) | join(\",\")) \(.)\"" \
+        <<<"$json" >"$known.tmp" 2>/dev/null || true
+    if [[ -s $known.tmp ]]; then
+        mv "$known.tmp" "$known"
+    else
+        rm -f "$known.tmp" "$known"
+    fi
+}
+
 ta_remote_hosts() {
     # key|name|socket|destination|port for every host to ask: listed
     # aliases first, then live ControlMaster connections not already
-    # listed. Socket names have to follow the ControlPath pattern
+    # listed, then online tailnet peers. Socket names have to follow the ControlPath pattern
     # <prefix>%r@%h:%p (dotfiles: ~/.ssh/master-%r@%h:%p); the glob comes
     # from @tmux-agent-ssh-sockets.
-    local alias k v host user port key glob prefix sock rest
+    local alias k v host user port key glob prefix sock rest name ip
     local -A have=()
     for alias in $(ta_opt TMUX_AGENT_REMOTES @tmux-agent-remotes ''); do
         host='' user='' port=''
@@ -96,27 +132,56 @@ ta_remote_hosts() {
         printf '%s|%s||%s|\n' "$key" "$alias" "$alias"
     done
 
-    [[ $(ta_opt TMUX_AGENT_REMOTE_DISCOVER @tmux-agent-remote-discover on) == on ]] || return 0
-    glob=$(ta_opt TMUX_AGENT_SSH_SOCKETS @tmux-agent-ssh-sockets "$HOME/.ssh/master-*")
-    glob=${glob/#\~/$HOME}
-    prefix=${glob##*/}
-    prefix=${prefix%%\**}
-    # Unquoted on purpose: the option is a glob.
-    # shellcheck disable=SC2086
-    for sock in $glob; do
-        [[ -S $sock ]] || continue
-        rest=${sock##*/}
-        rest=${rest#"$prefix"}
-        [[ $rest =~ ^(.+)@(.+):([0-9]+)$ ]] || continue
-        user=${BASH_REMATCH[1]} host=${BASH_REMATCH[2]} port=${BASH_REMATCH[3]}
-        key="$user@$host:$port"
-        ta_is_self "$host" && continue
-        [[ -z ${have[$key]:-} ]] || continue
-        # ControlPersist keeps a master a while after its last session.
-        ssh -O check -S "$sock" "$user@$host" >/dev/null 2>&1 || continue
+    if [[ $(ta_opt TMUX_AGENT_REMOTE_DISCOVER @tmux-agent-remote-discover on) == on ]]; then
+        glob=$(ta_opt TMUX_AGENT_SSH_SOCKETS @tmux-agent-ssh-sockets "$HOME/.ssh/master-*")
+        glob=${glob/#\~/$HOME}
+        prefix=${glob##*/}
+        prefix=${prefix%%\**}
+        # Unquoted on purpose: the option is a glob.
+        # shellcheck disable=SC2086
+        for sock in $glob; do
+            [[ -S $sock ]] || continue
+            rest=${sock##*/}
+            rest=${rest#"$prefix"}
+            [[ $rest =~ ^(.+)@(.+):([0-9]+)$ ]] || continue
+            user=${BASH_REMATCH[1]} host=${BASH_REMATCH[2]} port=${BASH_REMATCH[3]}
+            key="$user@$host:$port"
+            ta_is_self "$host" && continue
+            [[ -z ${have[$key]:-} ]] || continue
+            # ControlPersist keeps a master a while after its last session.
+            ssh -O check -S "$sock" "$user@$host" >/dev/null 2>&1 || continue
+            have[$key]=1
+            printf '%s|%s|%s|%s|%s\n' "$key" "$host" "$sock" "$user@$host" "$port"
+        done
+    fi
+
+    # Tailnet peers last: a live connection to one is already listed above
+    # and keeps riding its socket. The key uses the peer's short name, which
+    # is what ssh -G and a ControlPath give for a name resolved by MagicDNS.
+    user=$(id -un)
+    while IFS=$'\t' read -r name ip; do
+        [[ -n $name ]] || continue
+        ta_is_self "$name" && continue
+        key="$user@$name:22"
+        [[ -z ${have[$key]:-} && -z ${have[$user@$ip:22]:-} ]] || continue
         have[$key]=1
-        printf '%s|%s|%s|%s|%s\n' "$key" "$host" "$sock" "$user@$host" "$port"
-    done
+        printf '%s|%s||%s@%s|22\n' "$key" "$name" "$user" "${ip:-$name}"
+    done < <(ta_tailscale_peers)
+}
+
+ta_remote_known_hosts() {
+    # $1 host. When tailscale reported ssh host keys for it, add ssh options
+    # that trust exactly those keys for this connection (appends to
+    # TA_REMOTE_ARGV); fails for any other host, which keeps the user's
+    # known_hosts.
+    local known=$TA_STATE_DIR/tailscale-known-hosts names _
+    [[ -f $known ]] || return 1
+    while read -r names _; do
+        [[ ,$names, == *",$1,"* ]] || continue
+        TA_REMOTE_ARGV+=(-o "UserKnownHostsFile=$known" -o GlobalKnownHostsFile=/dev/null)
+        return 0
+    done <"$known"
+    return 1
 }
 
 ta_remote_target() {
@@ -130,6 +195,7 @@ ta_remote_target() {
         # Ride the live connection: no new login, and no second master.
         [[ -z $sock ]] || TA_REMOTE_ARGV+=(-S "$sock" -o ControlMaster=no)
         [[ -z $port ]] || TA_REMOTE_ARGV+=(-p "$port")
+        ta_remote_known_hosts "${dest#*@}" || true
         # shellcheck disable=SC2034 # read by bin/tmux-agent
         TA_REMOTE_DEST=$dest TA_REMOTE_NAME=$name
         return 0
@@ -197,9 +263,21 @@ ta_remote_notify() {
     done <"$4"
 }
 
+ta_remote_probe_due() {
+    # $1 key. False while the host last said it has no tmux-agent and that
+    # was under five minutes ago: with every tailnet peer asked, machines
+    # that will never run it must not cost an ssh login each round.
+    local st epoch meta=$TA_STATE_DIR/remote-$1.meta
+    [[ -f $meta ]] || return 0
+    IFS='|' read -r st epoch <"$meta" || return 0
+    [[ $st == noplugin && $epoch =~ ^[0-9]+$ ]] || return 0
+    (($(date +%s) - epoch >= 300))
+}
+
 ta_remote_fetch() {
     # $1 key, $2 host name. Ask the host for its agents and cache the answer.
     local out=$TA_STATE_DIR/remote-$1 rc=0 st=ok
+    ta_remote_probe_due "$1" || return 0
     ta_remote_ssh "$1" status --porcelain >"$out.tmp" 2>/dev/null || rc=$?
     case $rc in
     0) ;;

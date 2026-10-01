@@ -4,6 +4,7 @@ Classification fixtures, detection checks and CLI smoke tests for
 lib/engine.sh, bin/tmux-agent, lib/install-hooks and the TPM entry point.
 """
 
+import getpass
 import json
 import os
 import re
@@ -25,6 +26,7 @@ ENTRY = ROOT / "tmux-agentic.tmux"
 # live ssh connections. RemoteTests turn them back on explicitly.
 os.environ.setdefault("TMUX_AGENT_REMOTES", "")
 os.environ.setdefault("TMUX_AGENT_REMOTE_DISCOVER", "off")
+os.environ.setdefault("TMUX_AGENT_REMOTE_TAILSCALE", "off")
 
 
 def bash(script, *args, env=None):
@@ -958,6 +960,7 @@ class RemoteTests(unittest.TestCase):
             "PATH": f"{self.fake}:{os.environ['PATH']}",
             "TMUX_AGENT_REMOTES": "devbox",
             "TMUX_AGENT_REMOTE_DISCOVER": "off",
+            "TMUX_AGENT_REMOTE_TAILSCALE": "off",
             "TMUX_AGENT_SSH_SOCKETS": f"{self.sockets}/master-*",
             "TMUX_AGENT_REMOTE_INTERVAL": "10",
         }
@@ -1060,6 +1063,78 @@ class RemoteTests(unittest.TestCase):
                       f"-o BatchMode=yes -T me@gpu.example", "\n".join(fetches))
         r = self.cli("status", "--remote")
         self.assertIn("codex@gpu.example", r.stdout)
+
+    def tailnet(self, *peers):
+        """Put a tailscale stand-in in the fake bin dir. Each peer is
+        (name, ip, os, online, ssh_keys)."""
+        status = {"Self": {"HostName": "laptop", "DNSName": "laptop.tn.ts.net."},
+                  "Peer": {f"n{i}": {
+                      "HostName": n.title(), "DNSName": f"{n}.tn.ts.net.",
+                      "OS": o, "Online": up, "TailscaleIPs": [ip, "fd7a::1"],
+                      **({"sshHostKeys": keys} if keys else {})}
+                      for i, (n, ip, o, up, keys) in enumerate(peers)}}
+        data = self.fake / "tailscale.json"
+        data.write_text(json.dumps(status))
+        script = self.fake / "tailscale"
+        script.write_text(f'#!/bin/sh\ncat {shlex.quote(str(data))}\n')
+        script.chmod(0o755)
+
+    def test_tailnet_peers_are_discovered_and_trusted_by_their_keys(self):
+        me = getpass.getuser()
+        self.tailnet(
+            ("gpu", "100.64.0.7", "linux", True, ["ssh-ed25519 AAAAkey"]),
+            ("mac", "100.64.0.8", "macOS", True, []),
+            ("old", "100.64.0.9", "linux", False, []),
+            ("phone", "100.64.0.10", "android", True, []),
+            ("devbox", "100.64.0.11", "linux", True, []),        # already listed
+            (os.uname().nodename.split(".")[0], "100.64.0.12", "linux", True, []))
+        (self.fake / "G-devbox").write_text(f"hostname 100.64.0.11\nuser {me}\nport 22\n")
+        self.answer(f"{me}@100.64.0.7", "ready|codex|%4|w:1.1|@3|5|/src/ml\n")
+        self.fetch(TMUX_AGENT_REMOTE_TAILSCALE="on")
+        self.assertEqual((self.state / "remotes").read_text().splitlines(), [
+            f"{me}@100.64.0.11:22|devbox||devbox|",
+            f"{me}@gpu:22|gpu||{me}@100.64.0.7|22",
+            f"{me}@mac:22|mac||{me}@100.64.0.8|22",
+        ])
+        known = self.state / "tailscale-known-hosts"
+        self.assertEqual(known.read_text(), "100.64.0.7,gpu ssh-ed25519 AAAAkey\n")
+        gpu = [c for c in self.ssh_calls() if "--porcelain" in c and "gpu" not in c
+               and f"{me}@100.64.0.7" in c]
+        self.assertTrue(gpu and f"-o UserKnownHostsFile={known} -o GlobalKnownHostsFile=/dev/null" in gpu[0], gpu)
+        mac = [c for c in self.ssh_calls() if "--porcelain" in c and f"{me}@100.64.0.8" in c]
+        self.assertTrue(mac and "UserKnownHostsFile" not in mac[0], mac)
+        self.assertIn("codex@gpu", self.cli("status", "--remote").stdout)
+
+    def test_a_live_connection_to_a_peer_wins_over_tailscale(self):
+        me = getpass.getuser()
+        self.tailnet(("gpu", "100.64.0.7", "linux", True, []))
+        self.unix_socket(f"master-{me}@gpu:22")
+        self.fetch(TMUX_AGENT_REMOTE_TAILSCALE="on", TMUX_AGENT_REMOTE_DISCOVER="on",
+                   TMUX_AGENT_REMOTES="")
+        lines = (self.state / "remotes").read_text().splitlines()
+        self.assertEqual(lines, [
+            f"{me}@gpu:22|gpu|{self.sockets}/master-{me}@gpu:22|{me}@gpu|22"])
+
+    def test_tailscale_off_or_missing_lists_nothing(self):
+        self.tailnet(("gpu", "100.64.0.7", "linux", True, []))
+        self.fetch(TMUX_AGENT_REMOTES="")
+        self.assertFalse((self.state / "remotes").exists())
+        # A daemon that is down: tailscale fails, no peers.
+        (self.fake / "tailscale").write_text("#!/bin/sh\nexit 1\n")
+        self.fetch(TMUX_AGENT_REMOTE_TAILSCALE="on", TMUX_AGENT_REMOTES="")
+        self.assertEqual((self.state / "remotes").read_text(), "")
+
+    def test_hosts_without_the_plugin_are_probed_only_every_five_minutes(self):
+        self.answer("devbox", "", rc=127)
+        self.fetch()
+        self.assertEqual(len([c for c in self.ssh_calls() if "--porcelain" in c]), 1)
+        self.fetch()
+        self.assertEqual(len([c for c in self.ssh_calls() if "--porcelain" in c]), 1)
+        meta = self.state / f"remote-{self.KEY}.meta"
+        meta.write_text(f"noplugin|{self.now - 301}\n")
+        self.fetch()
+        self.assertEqual(len([c for c in self.ssh_calls() if "--porcelain" in c]), 2)
+        self.assertIn("install tmux-agentic-plugin there", self.cli("remotes").stdout)
 
     def test_hosts_that_leave_are_forgotten(self):
         self.answer("devbox", "idle|claude|%3|main:1.2|@2|0|/src\n")

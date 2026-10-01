@@ -743,9 +743,10 @@ cmd_remotes() {
         meta=$TA_STATE_DIR/remote-$k.meta
         [[ -f $meta ]] && IFS='|' read -r st epoch <"$meta"
         [[ -f $TA_STATE_DIR/remote-$k ]] && n=$(grep -c . "$TA_STATE_DIR/remote-$k" || true)
-        printf '%s\t%s\t%s\t%s %s ago\t%s agents\n' "$name" "$k" \
+        printf '%s\t%s\t%s\t%s %s ago\t%s agents%s\n' "$name" "$k" \
             "$([[ -n $sock ]] && echo connected || echo listed)" \
-            "$st" "$(age_str "$(($(now) - epoch))")" "$n"
+            "$st" "$(age_str "$(($(now) - epoch))")" "$n" \
+            "$([[ $st == noplugin ]] && echo ' (install tmux-agentic-plugin there)')"
     done <"$TA_STATE_DIR/remotes"
 }
 
