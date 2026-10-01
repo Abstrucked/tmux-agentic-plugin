@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `mobile` is a tap-friendly agent list and action menu for a phone terminal
+  (Termius over ssh). `send --pane <id> --key|--text ...` types into an
+  agent pane, a remote one over ssh, from a short allowlist of keys.
+
 - Agents on other machines show up next to local ones, as `claude@devbox`,
   in the strip, the picker and `prefix + A`, and notify when they get
   blocked or finish. Hosts are the ssh aliases in `@tmux-agent-remotes`,

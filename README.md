@@ -126,6 +126,27 @@ its `bin/tmux-agent`. `tailscale ssh` opens no ControlMaster connection, so
 list such hosts in `@tmux-agent-remotes`; plain `ssh` over the tailnet
 works. `tmux-agent remotes` shows each host and how its last fetch went.
 
+### From a phone
+
+`tmux-agent mobile` is a tap-friendly list of every agent this host can see
+(its own and the remote ones) with a live preview of the selected pane.
+Tap an agent for a menu of big rows: Enter, `y`, `n`, `1`-`3`, Esc,
+Ctrl-C, arrows, "Type a reply..." and "Open full session". Each key goes
+to the agent's pane (`tmux-agent send`), remote ones over ssh, and the
+preview shows what happened.
+
+With Termius: install Tailscale on the phone, add the host by its tailnet
+name (Tailscale SSH needs no keys), and set its startup command to
+`~/.config/tmux/plugins/tmux-agentic-plugin/bin/tmux-agent mobile` (use
+`~/.tmux/plugins/...` if that is where TPM put it). Turn on mouse support
+so taps select rows. Any host works as the entry point, since each one
+lists the others it can reach. Needs fzf; the list refreshes itself when
+curl is installed too, otherwise Ctrl-R.
+
+`send` accepts only agent panes and a short list of keys (Enter, Escape,
+Tab, Space, BSpace, the arrows, Ctrl-C, `y n Y N` and digits); `--text`
+is typed literally, never run.
+
 ### Clicking notifications
 
 Clicking a notification switches a tmux client to that agent's session,
