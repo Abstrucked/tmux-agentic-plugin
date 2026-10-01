@@ -16,7 +16,7 @@ agent CLIs running in any pane, and tracks each one's state:
 | ○    | idle    | finished and seen (green, name dimmed)  |
 
 - **Status bar strip**: one `mark name` per agent, most urgent first. Past
-  four agents it switches to counts per state (`◆ codex  ●5  ○3`), and keeps
+  four agents it switches to counts per state (`◆ codex  ● 5  ○ 3`), and keeps
   blocked agents named while there are at most two.
 - **Picker** (`prefix + a`): an fzf popup over every agent pane with a live
   preview. Enter switches to that pane, in any session.

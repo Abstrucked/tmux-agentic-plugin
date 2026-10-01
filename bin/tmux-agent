@@ -275,13 +275,12 @@ each_agent() {
 
 strip_item() {
     # $1 state, $2 agent name or count. Coloured state mark, then the label:
-    # white, or gray once idle so settled agents step back. Names get a space
-    # after the mark; counts sit right against it.
-    local label=white sep=' '
+    # white, or gray once idle so settled agents step back. Names and counts
+    # both get a space after the mark.
+    local label=white
     [[ $1 == idle ]] && label=gray
-    [[ $2 =~ ^[0-9]+$ ]] && sep=''
-    printf '#[fg=%s]%s%s#[fg=%s]%s#[default]' \
-        "$(ta_state_color "$1")" "$(ta_state_char "$1")" "$sep" "$label" "$2"
+    printf '#[fg=%s]%s #[fg=%s]%s#[default]' \
+        "$(ta_state_color "$1")" "$(ta_state_char "$1")" "$label" "$2"
 }
 
 strip_max() {

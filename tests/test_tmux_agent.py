@@ -295,15 +295,15 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(
             out,
             "#[fg=red]◆ #[fg=white]claude#[default]"
-            "  #[fg=yellow]●#[fg=white]3#[default]"
-            "  #[fg=green]○#[fg=gray]2#[default]",
+            "  #[fg=yellow]● #[fg=white]3#[default]"
+            "  #[fg=green]○ #[fg=gray]2#[default]",
         )
 
     def test_strip_counts_blocked_when_many_are_blocked(self):
         out = self.run_strip([("blocked", "claude")] * 3 + [("working", "codex")] * 2)
         self.assertEqual(
             out,
-            "#[fg=red]◆#[fg=white]3#[default]  #[fg=yellow]●#[fg=white]2#[default]",
+            "#[fg=red]◆ #[fg=white]3#[default]  #[fg=yellow]● #[fg=white]2#[default]",
         )
 
     def test_strip_max_is_configurable(self):
@@ -311,9 +311,9 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(
             out,
             "#[fg=red]◆ #[fg=white]claude#[default]"
-            "  #[fg=yellow]●#[fg=white]1#[default]"
-            "  #[fg=blue]◉#[fg=white]1#[default]"
-            "  #[fg=green]○#[fg=gray]1#[default]",
+            "  #[fg=yellow]● #[fg=white]1#[default]"
+            "  #[fg=blue]◉ #[fg=white]1#[default]"
+            "  #[fg=green]○ #[fg=gray]1#[default]",
         )
 
     def test_strip_max_argument_wins_over_environment(self):
