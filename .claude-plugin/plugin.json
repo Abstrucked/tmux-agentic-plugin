@@ -1,0 +1,10 @@
+{
+  "name": "tmux-agentic-plugin",
+  "version": "0.2.0",
+  "description": "Reports Claude Code session state (working, ready, blocked, idle) to the tmux agent strip, picker and notifications.",
+  "author": {"name": "Abstrucked", "url": "https://github.com/Abstrucked"},
+  "homepage": "https://github.com/Abstrucked/tmux-agentic-plugin",
+  "repository": "https://github.com/Abstrucked/tmux-agentic-plugin",
+  "license": "MIT",
+  "keywords": ["tmux", "agents", "status-bar", "notifications", "hooks", "claude-code"]
+}

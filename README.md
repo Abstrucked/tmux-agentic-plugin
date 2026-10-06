@@ -1,5 +1,7 @@
 # tmux-agentic-plugin
 
+[![HOL Guard](https://img.shields.io/endpoint?url=https%3A%2F%2Fhol.org%2Fapi%2Fregistry%2Fbadges%2Fguard%2FAbstrucked%2Ftmux-agentic-plugin&style=flat-square)](https://hol.org/registry/plugins/abstrucked%2Ftmux-agentic-plugin)
+
 See at a glance what your coding agents are doing across every tmux session,
 and jump straight to the one that needs you.
 
@@ -83,6 +85,21 @@ alone. `install-hooks --remove` takes them out again.
 
 TPM installs to `~/.config/tmux/plugins/` instead of `~/.tmux/plugins/` when
 your config lives in `~/.config/tmux`. Adjust the paths above to match.
+
+#### Claude Code hooks as a Claude Code plugin
+
+As an alternative to `install-hooks claude`, inside Claude Code run:
+
+```
+/plugin marketplace add Abstrucked/tmux-agentic-plugin
+/plugin install tmux-agentic-plugin@tmux-agentic
+```
+
+This only registers the Claude Code hooks. You still need the tmux plugin
+installed with TPM or manually, for the strip and the picker. Use either this
+or `install-hooks claude`; running both is harmless, since repeated hook
+events with the same state are ignored. Codex and OpenCode hooks still come
+from `install-hooks`.
 
 ### Remote agents
 
@@ -208,6 +225,13 @@ Run `tmux-agent` with no arguments for the full list.
 shellcheck bin/tmux-agent lib/engine.sh lib/remote.sh lib/install-hooks lib/raise tmux-agentic.tmux
 pytest tests
 ```
+
+## Privacy
+
+The plugin has no telemetry and sends nothing to the author or any third
+party. Remote agents are fetched over your own ssh, from the hosts you list,
+live ControlMaster connections and, unless `@tmux-agent-remote-tailscale` is
+`off`, your tailnet peers. See [PRIVACY.md](PRIVACY.md).
 
 ## License
 

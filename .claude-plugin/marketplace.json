@@ -1,0 +1,16 @@
+{
+  "name": "tmux-agentic",
+  "description": "Claude Code plugin that reports agent state to tmux.",
+  "owner": {
+    "name": "Abstrucked",
+    "url": "https://github.com/Abstrucked"
+  },
+  "plugins": [
+    {
+      "name": "tmux-agentic-plugin",
+      "source": "./",
+      "description": "Reports Claude Code session state to the tmux agent strip, picker and notifications.",
+      "version": "0.2.0"
+    }
+  ]
+}
