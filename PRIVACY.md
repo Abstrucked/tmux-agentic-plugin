@@ -5,8 +5,11 @@ the author or to any third party, and the code contains no HTTP client or
 analytics of any kind.
 
 - **Local state only.** Agent state lives in small files under
-  `$TMUX_AGENT_STATE_DIR`, by default `${TMPDIR:-/tmp}/tmux-agent-<uid>`
-  (`bin/tmux-agent`). Remove that directory to clear it.
+  `$TMUX_AGENT_STATE_DIR`, by default a private (0700) directory per tmux
+  server: `$XDG_RUNTIME_DIR/tmux-agent-<uid>/<server>`, else
+  `${TMPDIR:-/tmp}/tmux-agent-<uid>/<server>` (`bin/tmux-agent`). Remove
+  that directory to clear it. Earlier versions used one shared
+  `/tmp/tmux-agent-<uid>` that other local users could read; you can remove it.
 - **Hooks.** The Claude Code, Codex and OpenCode hooks only run the local
   `tmux-agent` script, which records the agent's state for its tmux pane.
   With jq installed it also stores a one-line detail per pane in the state
