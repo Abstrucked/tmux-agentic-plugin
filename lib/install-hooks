@@ -19,7 +19,7 @@ REMOVE=0
 
 # Events each agent reports, "Event" or "Event=matcher". Claude's
 # Notification only means blocked for permission and question dialogs.
-declare -r CLAUDE_EVENTS='SessionStart UserPromptSubmit PreToolUse PostToolUse PermissionRequest Notification=permission_prompt|elicitation_dialog Stop SessionEnd'
+declare -r CLAUDE_EVENTS='SessionStart UserPromptSubmit PreToolUse PostToolUse PermissionRequest Notification=permission_prompt|elicitation_dialog Stop StopFailure SessionEnd'
 declare -r CODEX_EVENTS='SessionStart UserPromptSubmit PreToolUse PostToolUse PermissionRequest Stop SessionEnd'
 
 merge_hooks() {

@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+- Notifications and the picker say why an agent stopped: the command awaiting
+  permission, the question, the first line of the final answer or the error.
+  Hooks record it (needs jq); `status --json` and `detail --pane` show it.
+- New `error` state (✖) for a turn that ended on an API error, from Claude
+  Code's `StopFailure` hook. Re-run `install-hooks claude` to get it; the
+  Claude Code plugin gets it on update.
+- Picker actions: ctrl-y approve (only while still blocked), ctrl-n deny or
+  interrupt, ctrl-e reply, ctrl-s mark seen, ctrl-d git diff preview, ctrl-l
+  reload.
+- Terminal notifications (OSC 9, 777 or kitty 99, by `TERM` or
+  `@tmux-agent-osc`) that work over ssh and without a display.
+  `@tmux-agent-notify-method` picks `auto`, `desktop`, `terminal` or `off`.
+- `@tmux-agent-notify-command` runs your command on every notification, with
+  the details in `TA_*` environment variables, for phone push through ntfy,
+  Pushover or Telegram.
+- `mobile` is a tap-friendly agent list and action menu for a phone terminal
+  (Termius over ssh). `send --pane <id> --key|--text ...` types into an
+  agent pane, a remote one over ssh, from a short allowlist of keys.
+- `diff --pane <id>` shows the git diff of an agent's directory.
+- Faster scans: one `ps` per scan and fewer pane captures.
+- An interrupted Claude Code turn no longer shows as working for 5 minutes.
+
 ## 0.2.0 (2026-10-06)
 
 - Installable as a Claude Code plugin that registers the Claude Code hooks:

@@ -7,6 +7,7 @@
 # bottom of the pane's captured output says what the agent waits on or that
 # it finished. States:
 #   blocked -- agent needs input or approval
+#   error   -- the last turn ended on an API error (rate limit, overload...)
 #   working -- agent is actively running
 #   ready   -- work finished, the pane has not been looked at since
 #   idle    -- finished and seen
@@ -25,13 +26,19 @@ declare -r TA_CPU_TICKS_WORKING=25
 # (prefix, so "claude-code" counts) and against argv as a path/word boundary.
 declare -r TA_AGENT_NAMES='opencode claude codex gemini aider amp droid grok copilot qoder kiro hermes antigravity'
 
+# Every state, most urgent first. Loops over states use this, so a new state
+# is added in one place.
+# shellcheck disable=SC2034 # used by the scripts that source this file
+declare -r TA_STATES='blocked error working ready idle'
+
 ta_state_rank() {
     case "$1" in
     blocked) echo 0 ;;
-    working) echo 1 ;;
-    ready) echo 2 ;;
-    idle) echo 3 ;;
-    *) echo 4 ;;
+    error) echo 1 ;;
+    working) echo 2 ;;
+    ready) echo 3 ;;
+    idle) echo 4 ;;
+    *) echo 5 ;;
     esac
 }
 
@@ -53,6 +60,7 @@ ta_state_color() {
     # tmux colour name per state.
     case "$1" in
     blocked) echo red ;;
+    error) echo magenta ;;
     working) echo yellow ;;
     ready) echo blue ;;
     idle) echo green ;;
@@ -64,6 +72,7 @@ ta_state_ansi() {
     # ANSI colour per state, for fzf --ansi.
     case "$1" in
     blocked) printf '\033[31m' ;;
+    error) printf '\033[35m' ;;
     working) printf '\033[33m' ;;
     ready) printf '\033[34m' ;;
     idle) printf '\033[32m' ;;
@@ -75,6 +84,7 @@ ta_state_char() {
     # Font-native mark per state: shape differs so it reads without colour.
     case "$1" in
     blocked) echo '◆' ;;
+    error) echo '✖' ;;
     working) echo '●' ;;
     ready) echo '◉' ;;
     *) echo '○' ;;
@@ -111,6 +121,8 @@ ta_hook_state() {
     PermissionRequest | Notification) echo blocked ;;
     permission.asked | form.created) echo blocked ;;
     Stop) echo ready ;;
+    # Fired when a turn ends on an API error (rate_limit, overloaded, billing_error...).
+    StopFailure) echo error ;;
     session.execution.succeeded | session.execution.failed | session.execution.interrupted) echo ready ;;
     SessionEnd) echo end ;;
     esac
@@ -129,6 +141,13 @@ ta_match_working() {
     grep -qiE \
         'esc to interrupt|esc to stop|working\.\.\.|thinking\.\.\.|running\.\.\.|(thinking|doodling|working|running|searching|planning|reading|writing|generating)…|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|◐|◓|◑|◒|⣾|⣽|⣻|⢿|⡿|⣟|⣯|⣷|◜|◠|◝|◞|◡|◟' \
         <<<"$1"
+}
+
+ta_match_interrupted() {
+    # Claude Code's interrupt line: "⎿  Interrupted by user" (older) or
+    # "Interrupted · What should Claude do instead?" (newer). Case-sensitive
+    # and narrow so code output mentioning "interrupted" does not match.
+    grep -qE 'Interrupted by user|Interrupted ·' <<<"$1"
 }
 
 ta_match_ready() {
@@ -183,19 +202,27 @@ ta_agent_name_of() {
     return 1
 }
 
+ta_ps_snapshot() {
+    # Load the process table once into globals so a scan can detect many
+    # panes without a ps per pane. Always reloads when called.
+    declare -gA TA_PS_CHILDREN=() TA_PS_COMMS=() TA_PS_ARGS=()
+    local pid ppid comm args
+    while read -r pid ppid comm args; do
+        TA_PS_CHILDREN[$ppid]="${TA_PS_CHILDREN[$ppid]:-} $pid"
+        TA_PS_COMMS[$pid]=$comm
+        TA_PS_ARGS[$pid]=$args
+    done < <(ps -eo pid=,ppid=,comm=,args= 2>/dev/null)
+    TA_PS_LOADED=1
+}
+
 ta_detect_agent() {
     # $1 pane pid. Prints "<agent name> <agent pid>" for the first agent
     # process found in the pane's process tree (the pane process included).
+    # Uses the ta_ps_snapshot tables, loading them if nobody has.
     local root=${1:-}
     [[ -n "$root" ]] || return 1
-    local pid ppid comm args next name
-    local -A children=() comms=() argss=()
-    while read -r pid ppid comm args; do
-        children[$ppid]="${children[$ppid]:-} $pid"
-        comms[$pid]=$comm
-        argss[$pid]=$args
-    done < <(ps -eo pid=,ppid=,comm=,args= 2>/dev/null)
-
+    [[ -n "${TA_PS_LOADED:-}" ]] || ta_ps_snapshot
+    local pid next name
     local queue=("$root") visited=' '
     while ((${#queue[@]} > 0)); do
         pid=${queue[0]}
@@ -204,11 +231,11 @@ ta_detect_agent() {
         *" $pid "*) continue ;;
         esac
         visited="$visited$pid "
-        if name=$(ta_agent_name_of "${comms[$pid]:-}" "${argss[$pid]:-}"); then
+        if name=$(ta_agent_name_of "${TA_PS_COMMS[$pid]:-}" "${TA_PS_ARGS[$pid]:-}"); then
             printf '%s %s\n' "$name" "$pid"
             return 0
         fi
-        for next in ${children[$pid]:-}; do
+        for next in ${TA_PS_CHILDREN[$pid]:-}; do
             queue+=("$next")
         done
     done
@@ -249,4 +276,52 @@ ta_ps_time_ticks() {
         secs=$((secs * 60 + 10#$part))
     done
     echo $(((10#$days * 86400 + secs) * 100 + 10#$cs))
+}
+
+# Keys the send command may inject must stay inside bin/tmux-agent's
+# ta_send_key_ok allowlist (Enter Escape Tab Space BSpace Up Down Left Right
+# C-c and single y n Y N 0-9).
+ta_approve_key() {
+    # $1 agent. Key that approves a pending permission prompt; none if unknown.
+    case "$1" in
+    claude) echo 1 ;; # permission dialog: "1. Yes"
+    codex) echo y ;;
+    *) return 1 ;;
+    esac
+}
+
+ta_deny_key() {
+    # $1 agent. Key that dismisses a pending permission prompt.
+    case "$1" in
+    claude | codex | opencode) echo Escape ;;
+    *) return 1 ;;
+    esac
+}
+
+ta_sanitize() {
+    # $1 text, $2 max characters (default 200). One line safe for a
+    # notification, OSC sequence or the picker: control characters gone
+    # (whitespace ones become spaces first), "|" swapped for "¦" (the field
+    # separator of detail files and picker rows), whitespace collapsed.
+    local s max=${2:-200}
+    s=$(printf '%s' "${1:-}" | tr '\n\t\r' '   ' | tr -d '\000-\037\177' | tr -s ' ')
+    s=${s//|/¦}
+    s=${s# }
+    s=${s% }
+    if ((${#s} > max)); then
+        s="${s:0:max-1}…"
+    fi
+    printf '%s\n' "$s"
+}
+
+ta_detail_read() {
+    # $1 state dir, $2 pane id. Detail file is one "epoch|event|text" line;
+    # prints the text (it never contains "|"), fails when there is none.
+    local line rest
+    [[ -s "$1/detail-$2" ]] || return 1
+    IFS= read -r line <"$1/detail-$2" || [[ -n "$line" ]] || return 1
+    rest=${line#*|}
+    rest=${rest#*|}
+    [[ -n "$rest" ]] || return 1
+    printf '%s\n' "$rest"
 }
