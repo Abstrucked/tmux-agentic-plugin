@@ -1,0 +1,26 @@
+{
+  "name": "tmux-agentic-plugin",
+  "version": "0.2.0",
+  "description": "tmux status strip, picker and notifications for Claude Code, Codex and OpenCode agent sessions.",
+  "author": {"name": "Abstrucked", "url": "https://github.com/Abstrucked"},
+  "homepage": "https://github.com/Abstrucked/tmux-agentic-plugin",
+  "repository": "https://github.com/Abstrucked/tmux-agentic-plugin",
+  "license": "MIT",
+  "keywords": ["tmux", "agents", "status-bar", "notifications", "hooks", "codex"],
+  "interface": {
+    "type": "cli",
+    "displayName": "tmux agentic plugin",
+    "shortDescription": "See what every coding agent in tmux is doing.",
+    "longDescription": "A tmux plugin that shows which Claude Code, Codex and OpenCode agents are working, ready, blocked or idle in a status-bar strip, jumps to them from a picker and sends local desktop notifications when one needs input.",
+    "developerName": "Abstrucked",
+    "category": "Developer Tools",
+    "capabilities": ["Read"],
+    "websiteURL": "https://github.com/Abstrucked/tmux-agentic-plugin",
+    "privacyPolicyURL": "https://github.com/Abstrucked/tmux-agentic-plugin/blob/main/PRIVACY.md",
+    "termsOfServiceURL": "https://github.com/Abstrucked/tmux-agentic-plugin/blob/main/LICENSE",
+    "brandColor": "#1E2030",
+    "composerIcon": "./assets/icon.svg",
+    "logo": "./assets/logo.svg",
+    "screenshots": ["./docs/strip.png", "./docs/picker.png"]
+  }
+}

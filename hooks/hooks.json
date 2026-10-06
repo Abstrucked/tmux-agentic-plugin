@@ -1,0 +1,93 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/tmux-agent\" hook claude SessionStart"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/tmux-agent\" hook claude UserPromptSubmit"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/tmux-agent\" hook claude PreToolUse"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/tmux-agent\" hook claude PostToolUse"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/tmux-agent\" hook claude PermissionRequest"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt|elicitation_dialog",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/tmux-agent\" hook claude Notification"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/tmux-agent\" hook claude Stop"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/tmux-agent\" hook claude SessionEnd"
+          }
+        ]
+      }
+    ]
+  }
+}
