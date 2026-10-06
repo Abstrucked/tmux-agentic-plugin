@@ -327,6 +327,88 @@ class ServerTargetingTests(Base):
                          [name])
 
 
+class LockFallbackTests(Base):
+    """Without flock, refresh takes a mkdir lock; it must never spin."""
+
+    def setUp(self):
+        super().setUp()
+        self.bin = self.dir / "nolock"
+        self.bin.mkdir()
+        for tool in ("bash", "env", "cat", "head", "tail", "date", "rmdir", "id", "rm", "mv",
+                     "tr", "dirname", "readlink", "sh", "ps", "grep", "sleep", "sort", "cut",
+                     "sed", "awk", "cksum", "stat", "wc", "touch", "chmod"):
+            found = shutil.which(tool)
+            if found:
+                (self.bin / tool).symlink_to(found)
+        fake_tmux(self.bin)
+        self.env = {**self.env, "PATH": str(self.bin), "TMUX_AGENT_LOCK_TRIES": "6"}
+
+    def test_a_mkdir_that_always_fails_gives_up(self):
+        (self.bin / "mkdir").write_text('#!/bin/sh\n[ "$1" = -p ] && exit 0\nexit 1\n')
+        (self.bin / "mkdir").chmod(0o755)
+        t = time.time()
+        r = self.run_cli("refresh", "1")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertLess(time.time() - t, 10)
+        self.assertFalse((self.state / "stamp").exists())
+
+    def test_a_held_lock_gives_up_after_the_takeover_attempt(self):
+        mkdir = shutil.which("mkdir")
+        (self.bin / "mkdir").symlink_to(mkdir)
+        (self.state / "lock.d").mkdir()
+        r = self.run_cli("refresh", "1")
+        # The stale lock is taken over halfway, so the scan then runs.
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((self.state / "stamp").exists())
+
+    def test_a_missing_sleep_does_not_spin(self):
+        (self.bin / "sleep").unlink()
+        (self.bin / "mkdir").write_text('#!/bin/sh\n[ "$1" = -p ] && exit 0\nexit 1\n')
+        (self.bin / "mkdir").chmod(0o755)
+        t = time.time()
+        r = self.run_cli("refresh", "1")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertLess(time.time() - t, 10)
+
+    def stuck(self):
+        """A lock that never frees: mkdir fails, a cached agent exists."""
+        (self.bin / "mkdir").write_text('#!/bin/sh\n[ "$1" = -p ] && exit 0\nexit 1\n')
+        (self.bin / "mkdir").chmod(0o755)
+        (self.state / "stamp").write_text("1\n")
+        self.write_state("%1", "blocked")
+
+    def test_readers_fall_back_to_the_cached_state(self):
+        self.stuck()
+        for args in (("strip",), ("status",), ("status", "--porcelain"), ("pick-rows",),
+                     ("mobile-rows",), ("window-dot", "@1"), ("pane-label", "%1")):
+            with self.subTest(args=args):
+                r = self.run_cli(*args)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertTrue(r.stdout.strip(), args)
+        self.assertIn("claude", self.run_cli("strip").stdout)
+
+    def test_a_guarded_send_refuses_when_it_cannot_refresh(self):
+        self.stuck()
+        for guard in (("--expect-state", "blocked"), ("--expect-epoch", "5")):
+            with self.subTest(guard=guard):
+                r = self.run_cli("send", "--pane", "%1", *guard, "--key", "y")
+                self.assertEqual(r.returncode, 3, r.stderr)
+                self.assertIn("send: could not refresh state", r.stderr)
+        log = self.bin / "tmux.log"
+        self.assertFalse(log.exists() and "send-keys" in log.read_text())
+
+    def test_an_unwritable_state_dir_returns_at_once(self):
+        (self.bin / "mkdir").symlink_to(shutil.which("mkdir"))
+        self.state.chmod(0o500)
+        self.addCleanup(self.state.chmod, 0o700)
+        if os.access(self.state, os.W_OK):
+            self.skipTest("running as a user who ignores permissions")
+        t = time.time()
+        r = self.run_cli("refresh", "1")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertLess(time.time() - t, 5)
+
+
 class MobileTests(Base):
     def setUp(self):
         super().setUp()

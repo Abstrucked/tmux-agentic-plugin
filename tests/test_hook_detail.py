@@ -12,7 +12,7 @@ import time
 import unittest
 from pathlib import Path
 
-from test_tmux_agent import CLI, fake_tmux
+from test_tmux_agent import CLI, HookTests, fake_tmux
 
 HAVE_JQ = shutil.which("jq") is not None
 
@@ -25,6 +25,8 @@ class Sandbox(unittest.TestCase):
         # state dir while it is removed.
         self._tmp = tempfile.TemporaryDirectory(prefix="ta-detail-", ignore_cleanup_errors=True)
         self.addCleanup(self._tmp.cleanup)
+        # ...and runs first: wait for it before the dir goes.
+        self.addCleanup(lambda: HookTests.settle(str(self.dir / "state"), wait_stamp=False))
         self.dir = Path(self._tmp.name)
         self.state = self.dir / "state"
         self.state.mkdir()
@@ -178,8 +180,11 @@ class HookDetailTests(Sandbox):
     def test_without_jq_nothing_is_written(self):
         nojq = self.dir / "nojq"
         nojq.mkdir()
-        for tool in ("bash", "env", "cat", "head", "date", "mkdir", "id", "rm", "mv",
-                     "tr", "dirname", "readlink", "sh", "ps", "grep"):
+        # Everything the hook and its background rescan use except jq: a
+        # missing sleep or mkdir would make the rescan's lock loop spin.
+        for tool in ("bash", "env", "cat", "head", "tail", "date", "mkdir", "rmdir", "id",
+                     "rm", "mv", "tr", "dirname", "readlink", "sh", "ps", "grep", "sleep",
+                     "flock", "sort", "cut", "sed", "awk", "cksum", "stat", "wc", "touch"):
             path = shutil.which(tool)
             if path:
                 (nojq / tool).symlink_to(path)

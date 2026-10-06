@@ -149,7 +149,11 @@ doc_notify() {
         doc_line WARN "notify" "no desktop notifier reachable (notify-send with a bus or display, or osascript)"
     fi
     cmd=$(ta_opt TMUX_AGENT_NOTIFY_COMMAND @tmux-agent-notify-command '')
-    doc_line INFO "notify cmd" "$([[ -n $cmd ]] && echo set || echo 'not set')"
+    if [[ -n $cmd ]]; then
+        doc_line INFO "notify cmd" "set"
+    else
+        doc_line INFO "notify cmd" "not set"
+    fi
     forced=$(ta_opt TMUX_AGENT_OSC @tmux-agent-osc '')
     while IFS='|' read -r tty term; do
         [[ -n $tty ]] || continue
@@ -171,7 +175,9 @@ doc_remotes() {
         n=$((n + 1))
         st=pending
         meta=$TA_STATE_DIR/remote-$k.meta
-        [[ -f $meta ]] && IFS='|' read -r st _ <"$meta" || true
+        if [[ -f $meta ]]; then
+            IFS='|' read -r st _ <"$meta" || true
+        fi
         case $st in err | noplugin) bad+=("$name ($st)") ;; esac
     done <"$TA_STATE_DIR/remotes"
     if ((${#bad[@]})); then
@@ -322,10 +328,12 @@ cmd_explain() {
     if [[ -f $f ]]; then
         IFS='|' read -r rstate repoch <"$f" || true
         [[ $repoch =~ ^[0-9]+$ ]] || repoch=0
-        if doc_authoritative "$rstate" "$repoch" "$now_s" "$([[ -n $detect ]] && echo 1 || echo 0)"; then
-            report_auth=1
+        local has_agent=0 auth_word=no
+        [[ -z $detect ]] || has_agent=1
+        if doc_authoritative "$rstate" "$repoch" "$now_s" "$has_agent"; then
+            report_auth=1 auth_word=yes
         fi
-        echo "report     state=${rstate:-?} epoch=$repoch ($(doc_age "$repoch")) authoritative=$([[ $report_auth == 1 ]] && echo yes || echo no) ttl=${TA_REPORT_TTL}s"
+        echo "report     state=${rstate:-?} epoch=$repoch ($(doc_age "$repoch")) authoritative=$auth_word ttl=${TA_REPORT_TTL}s"
     else
         echo "report     none"
     fi
@@ -354,7 +362,9 @@ cmd_explain() {
     [[ $seen_at =~ ^[0-9]+$ ]] || seen_at=0
     ((seen_at >= changed && seen_at > 0)) && seen=1
     if ((seen_at)); then
-        echo "seen       $(doc_age "$seen_at"); since last change: $([[ $seen == 1 ]] && echo yes || echo no)"
+        local seen_word=no
+        ((!seen)) || seen_word=yes
+        echo "seen       $(doc_age "$seen_at"); since last change: $seen_word"
     else
         echo "seen       never"
     fi
@@ -365,11 +375,13 @@ cmd_explain() {
     [[ -z $apid ]] || cpu=$(ta_proc_cpu "$apid" || echo 0)
     delta=$((cpu - pcpu))
     [[ -n $phash && $hash != "$phash" ]] && output_changed=1
+    local changed_word=no
+    ((!output_changed)) || changed_word=yes
     echo "heuristics last lines of the pane:"
     while IFS= read -r line; do
         printf '             | %s\n' "$line"
     done < <(printf '%s\n' "$tail" | tail -n 5)
-    echo "           cpu ticks now=$cpu stored=$pcpu delta=$delta (working at >= $TA_CPU_TICKS_WORKING with output change); output changed=$([[ $output_changed == 1 ]] && echo yes || echo no)"
+    echo "           cpu ticks now=$cpu stored=$pcpu delta=$delta (working at >= $TA_CPU_TICKS_WORKING with output change); output changed=$changed_word"
 
     local heur heur_unseen final source
     heur=$(ta_classify "$tail" "$delta" "$prev" "$seen" "$output_changed")

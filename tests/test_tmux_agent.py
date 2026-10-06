@@ -735,12 +735,12 @@ class HookTests(unittest.TestCase):
                 self.settle(directory)
 
     @staticmethod
-    def settle(state_dir):
+    def settle(state_dir, wait_stamp=True):
         """The hook leaves a background rescan writing into state_dir; wait
         for it (it takes the scan lock) so the directory can be removed."""
         d = Path(state_dir)
         deadline = time.time() + 5
-        while not (d / "stamp").exists() and time.time() < deadline:
+        while wait_stamp and not (d / "stamp").exists() and time.time() < deadline:
             time.sleep(0.02)
         if shutil.which("flock"):
             subprocess.run(["flock", str(d / "lock"), "true"], timeout=10)
@@ -894,7 +894,15 @@ const dispose = def.setup({
     await new Promise((resolve) => signal.addEventListener("abort", resolve));
   } } },
 });
-await new Promise((resolve) => setTimeout(resolve, 500));
+// The hook queue dies with this process: wait for all 5 expected calls
+// (slow runners), then a little longer to catch unexpected extras.
+const { existsSync, readFileSync } = await import("node:fs");
+const count = () => existsSync(process.env.LOG)
+  ? readFileSync(process.env.LOG, "utf8").split("\n").filter(Boolean).length : 0;
+for (let i = 0; i < 200 && count() < 5; i++) {
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+await new Promise((resolve) => setTimeout(resolve, 400));
 dispose();
 """
 
@@ -912,7 +920,7 @@ dispose();
                 ["node", "--input-type=module", "-e", self.SCRIPT],
                 capture_output=True, text=True, timeout=30,
                 env={**os.environ, "PLUGIN_URL": plugin.as_uri(),
-                     "TMUX_PANE": "%1", "TMUX_AGENT_BIN": str(bin_)},
+                     "TMUX_PANE": "%1", "TMUX_AGENT_BIN": str(bin_), "LOG": str(log)},
             )
             self.assertEqual(r.returncode, 0, r.stderr)
             deadline = time.time() + 5

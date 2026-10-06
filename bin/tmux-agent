@@ -171,8 +171,12 @@ refresh() {
     # Hooks refresh in the background while the status bar polls. Serialize
     # scans so a transition is seen, and notified, exactly once.
     # The lock fd is global so notify() can close it in its background job.
-    local rc=0
-    mkdir -p "$TA_STATE_DIR"
+    # Giving up (no lock, no writable state dir) is quiet for readers, who
+    # fall back to the cached state; TA_REFRESH_STRICT=1 makes it fail, for
+    # callers that must not act on stale state (send's guard).
+    local rc=0 giveup=0
+    [[ -z ${TA_REFRESH_STRICT:-} ]] || giveup=1
+    mkdir -p "$TA_STATE_DIR" 2>/dev/null || return "$giveup"
     if command -v flock >/dev/null 2>&1; then
         exec {TA_LOCK_FD}>"$TA_STATE_DIR/lock"
         flock "$TA_LOCK_FD"
@@ -181,15 +185,17 @@ refresh() {
         TA_LOCK_FD=''
         return "$rc"
     fi
-    # No flock (macOS): mkdir is atomic. A lock held past 10s was left by
-    # a killed scan, so take it over.
-    local lock="$TA_STATE_DIR/lock.d" tries=0
+    # No flock (macOS): mkdir is atomic. A lock held past ~10s was left by
+    # a killed scan, so take it over. Give up after ~20s (or at once when
+    # the state dir is not writable) instead of spinning: the caller's next
+    # refresh tries again. TMUX_AGENT_LOCK_TRIES (0.1s each) shortens it.
+    local lock="$TA_STATE_DIR/lock.d" tries=0 max=${TMUX_AGENT_LOCK_TRIES:-200}
+    [[ $max =~ ^[0-9]+$ ]] || max=200
+    [[ -d $TA_STATE_DIR && -w $TA_STATE_DIR ]] || return "$giveup"
     until mkdir "$lock" 2>/dev/null; do
-        if ((++tries > 100)); then
-            rmdir "$lock" 2>/dev/null || true
-            tries=0
-        fi
-        sleep 0.1
+        ((++tries < max)) || return "$giveup"
+        ((tries != max / 2)) || rmdir "$lock" 2>/dev/null || true
+        sleep 0.1 || true
     done
     scan "$@" || rc=$?
     rmdir "$lock" 2>/dev/null || true
@@ -911,8 +917,11 @@ cmd_send() {
     fi
     # A guarded send must not trust a scan up to 3s old: a hook report
     # may already say the prompt is gone.
-    if [[ -n $expect ]]; then
-        refresh 1
+    if [[ -n $expect || -n $epoch ]]; then
+        TA_REFRESH_STRICT=1 refresh 1 || {
+            echo "send: could not refresh state" >&2
+            return 3
+        }
     else
         refresh
     fi
@@ -1129,7 +1138,7 @@ main() {
     local cmd=${1:-}
     shift || true
     case $cmd in
-    refresh) refresh "${1:-0}" ;;
+    refresh) TA_REFRESH_STRICT=1 refresh "${1:-0}" ;;
     strip) strip "$@" ;;
     window-dot) window_dot "${1:-}" ;;
     pane-label) pane_label "${1:-}" ;;
