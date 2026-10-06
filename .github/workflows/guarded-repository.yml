@@ -1,0 +1,27 @@
+name: Guarded Repository
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Verifications expire after 7 days; refresh weekly.
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  guard:
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+      security-events: write
+    uses: hashgraph-online/hol-guard/.github/workflows/guarded-repository.yml@1cf26d4eea813b984f2b53324888e9f3d347acf9 # v3.27.1
+    with:
+      profile: strict-security
+      fail_on_severity: high
+      upload_sarif: true
+      visibility: public
