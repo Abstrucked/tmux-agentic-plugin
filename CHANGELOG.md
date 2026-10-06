@@ -1,6 +1,24 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-10-06)
+
+- Installable as a Claude Code plugin that registers the Claude Code hooks:
+  `/plugin marketplace add Abstrucked/tmux-agentic-plugin`, then
+  `/plugin install tmux-agentic-plugin@tmux-agentic`. An alternative to
+  `install-hooks claude`; the tmux plugin is still installed separately.
+- Metadata-only Codex plugin manifest. Codex hooks still come from
+  `install-hooks codex`.
+- `PRIVACY.md` states what the plugin collects (nothing) and what it sends.
+- CI runs the HOL Guard repository scan and publishes signed provenance, with
+  test dependencies installed from hash-pinned `requirements-dev.txt`.
+- The strip puts a space between a state mark and an agent count (`● 5`).
+
+- Tailscale peers are asked for their agents too (`@tmux-agent-remote-tailscale`,
+  needs `tailscale` and `jq`). Hosts without the plugin are retried every
+  5 minutes and show as `noplugin` in `remotes`; one host is asked per peer.
+- A `tmux-agent watch` over ssh keeps each remote host's agents current within
+  a second (`@tmux-agent-remote-watch`); hosts that lack it are polled every
+  interval, and unreachable hosts are backed off.
 
 - Agents on other machines show up next to local ones, as `claude@devbox`,
   in the strip, the picker and `prefix + A`, and notify when they get
