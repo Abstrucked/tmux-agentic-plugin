@@ -30,6 +30,12 @@
 #   focus --pane <id>    switch a client to the pane and raise its terminal
 #                        window (what clicking a notification does)
 #   refresh              update cached state now
+#   send --pane <id> (--key K | --text T)...
+#                        type into an agent pane, in order: --key takes
+#                        Enter Escape Tab Space BSpace Up Down Left Right
+#                        C-c or one of y n Y N 0-9; --text is literal
+#   mobile               tap-friendly agent list and action menu for a
+#                        phone terminal (Termius over ssh)
 #   remotes              list remote hosts and how their last fetch went
 #   remote-refresh       fetch every remote host's agents now
 #   watch                stream this host's agents to other hosts: lines
@@ -56,6 +62,10 @@ SELF="$(readlink -f "$0")"
 . "$(dirname "$SELF")/../lib/engine.sh"
 # shellcheck source=../lib/remote.sh
 . "$(dirname "$SELF")/../lib/remote.sh"
+# shellcheck source=../lib/notify.sh
+. "$(dirname "$SELF")/../lib/notify.sh"
+# shellcheck source=../lib/pick.sh
+. "$(dirname "$SELF")/../lib/pick.sh"
 
 declare -r TA_STATE_DIR="${TMUX_AGENT_STATE_DIR:-${TMPDIR:-/tmp}/tmux-agent-$(id -u)}"
 declare -r TA_PANE_FMT='#{pane_id}|#{pane_pid}|#{window_id}|#{session_name}:#{window_index}.#{pane_index}|#{pane_current_path}'
@@ -88,47 +98,6 @@ pane_in_view() {
         [[ $(tmux display-message -p -c "$name" '#{pane_id}' 2>/dev/null) == "$1" ]] && return 0
     done < <(tmux list-clients -F '#{?#{m:*focused*,#{client_flags}},#{client_name},}' 2>/dev/null)
     return 1
-}
-
-notify_wait() {
-    # $1 urgency, $2 pane id, $3 title, $4 body. Clicking the notification
-    # (its default action) focuses the pane. --wait holds until the
-    # notification closes; libnotify before 0.7.9 has no --wait, so fall back
-    # to a plain notification.
-    local action
-    if ! action=$(notify-send -a tmux-agent -u "$1" -A default=Show --wait "$3" "$4"); then
-        notify-send -a tmux-agent -u "$1" "$3" "$4" || true
-        return 0
-    fi
-    if [[ $action == default ]]; then
-        "$SELF" focus --pane "$2"
-    fi
-}
-
-notify() {
-    # $1 agent, $2 state, $3 tmux target, $4 working directory, $5 pane id.
-    [[ $(tmux show-option -gqv @tmux-agent-notify 2>/dev/null) != off ]] || return 0
-    local what=finished urgency=normal title body
-    if [[ $2 == blocked ]]; then
-        what='needs input'
-        urgency=critical
-    fi
-    title="$1 $what" body="${4##*/} · $3"
-    if command -v notify-send >/dev/null 2>&1; then
-        # Waits for the click in the background, off the scan lock (the
-        # child would hold it until the notification closes) and off the
-        # status job's output, which tmux reads to EOF.
-        (
-            [[ -z ${TA_LOCK_FD:-} ]] || exec {TA_LOCK_FD}>&-
-            trap '' HUP
-            notify_wait "$urgency" "$5" "$title" "$body"
-        ) </dev/null >/dev/null 2>&1 &
-    elif command -v osascript >/dev/null 2>&1; then
-        # Text goes in as arguments, so quotes in paths need no escaping.
-        osascript -e 'on run argv' \
-            -e 'display notification (item 2 of argv) with title (item 1 of argv)' \
-            -e 'end run' "$title" "$body" >/dev/null 2>&1 || true
-    fi
 }
 
 mark_seen() {
@@ -693,43 +662,171 @@ cmd_focus() {
     "$(dirname "$SELF")/../lib/raise" "${client##*|}" </dev/null >/dev/null 2>&1 || true
 }
 
-pad() {
-    # $1 text, $2 width: left-aligned, padded with spaces. Counts characters,
-    # not bytes, so it lines up where printf's %-Ns would not.
-    printf '%s%*s' "$1" "$(($2 > ${#1} ? $2 - ${#1} : 0))" ''
+ta_send_key_ok() {
+    # $1 key name. The keys send accepts: no shell, no arbitrary tmux key.
+    case $1 in
+    Enter | Escape | Tab | Space | BSpace | Up | Down | Left | Right | C-c) return 0 ;;
+    [ynYN0-9]) return 0 ;;
+    esac
+    return 1
 }
 
-cmd_pick() {
-    refresh
-    local st ag host tgt age id path i
-    local -a sts=() ags=() dirs=() tgts=() ages=() panes=()
-    while IFS='|' read -r st ag host tgt age id path; do
-        sts+=("$st") ags+=("$ag${host:+@$host}") dirs+=("${path##*/}") tgts+=("$tgt")
-        panes+=("$id") ages+=("$(age_str "$age")")
-    done < <(each_agent)
-    if ((${#panes[@]} == 0)); then
-        echo "no agent panes" >&2
-        return 1
+cmd_send() {
+    # --pane <id|key/pane>, then --key and --text in the order to type them.
+    # Only agent panes take input. A remote one is forwarded to its host.
+    local pane='' i
+    local -a acts=()
+    while (($#)); do
+        case $1 in
+        --pane)
+            pane=${2:-}
+            shift 2 || break
+            ;;
+        --key)
+            ta_send_key_ok "${2:-}" || {
+                echo "send: key not allowed: ${2:-}" >&2
+                return 2
+            }
+            acts+=("$1" "$2")
+            shift 2
+            ;;
+        --text)
+            [[ $# -ge 2 ]] || return 2
+            acts+=("$1" "$2")
+            shift 2
+            ;;
+        *)
+            echo "send: unknown argument: $1" >&2
+            return 2
+            ;;
+        esac
+    done
+    if [[ -z $pane || ${#acts[@]} -eq 0 ]]; then
+        echo "usage: tmux-agent send --pane <id> (--key K | --text T)..." >&2
+        return 2
     fi
-    # Pad columns to their widest entry. Tabs would jump to the next 8-column
-    # stop whenever a name is 8 characters long ("opencode").
-    local wa=0 wd=0 wt=0
-    for i in "${!panes[@]}"; do
-        ((${#ags[i]} > wa)) && wa=${#ags[i]}
-        ((${#dirs[i]} > wd)) && wd=${#dirs[i]}
-        ((${#tgts[i]} > wt)) && wt=${#tgts[i]}
+    if [[ $pane == */* ]]; then
+        ta_remote_ssh "${pane%%/*}" send --pane "${pane#*/}" "${acts[@]}"
+        return
+    fi
+    refresh
+    [[ -f $TA_STATE_DIR/state-$pane ]] || {
+        echo "send: not an agent pane: $pane" >&2
+        return 1
+    }
+    for ((i = 0; i < ${#acts[@]}; i += 2)); do
+        if [[ ${acts[i]} == --key ]]; then
+            tmux send-keys -t "$pane" "${acts[i + 1]}"
+        else
+            tmux send-keys -t "$pane" -l -- "${acts[i + 1]}"
+        fi
     done
-    local rows=()
-    for i in "${!panes[@]}"; do
-        # The pane id rides along after a tab, hidden from the list.
-        rows+=("$(ta_state_mark "${sts[i]}")  $(pad "${ags[i]}" "$wa")  $(pad "${dirs[i]}" "$wd")  $(pad "${tgts[i]}" "$wt")  ${ages[i]}"$'\t'"${panes[i]}")
+}
+
+mobile_rows() {
+    # One agent per line for the phone list: state mark, agent@host and
+    # directory, then the pane id after a tab, hidden by fzf.
+    refresh
+    local st ag host tgt age id path
+    while IFS='|' read -r st ag host tgt age id path; do
+        printf '%s %s%s  %s  %s\t%s\n' "$(ta_state_mark "$st")" "$ag" "${host:+@$host}" \
+            "${path##*/}" "$(age_str "$age")" "$id"
+    done < <(each_agent)
+}
+
+mobile_open() {
+    # $1 pane id or "<key>/<pane>". Inside tmux, jump there; from a plain
+    # terminal (a phone ssh session) attach to the pane's session instead.
+    local pane=$1 tail
+    if [[ -n ${TMUX:-} ]]; then
+        goto_pane "$pane"
+        return
+    fi
+    tail="${pane#*/}"
+    if [[ $pane == */* ]]; then
+        ta_remote_target "${pane%%/*}" || return 1
+        "${TA_REMOTE_ARGV[@]}" -t "$TA_REMOTE_DEST" \
+            "tmux attach-session -t $tail \\; select-window -t $tail \\; select-pane -t $tail" || true
+    else
+        tmux attach-session -t "$tail" \; select-window -t "$tail" \; select-pane -t "$tail" || true
+    fi
+}
+
+mobile_menu() {
+    # $1 pane id. Big rows to tap; each key sent keeps the menu open so
+    # the pane's new state shows in the preview. Back (or Esc) leaves.
+    local pane=$1 sel act text
+    local -a rows=(
+        $'⏎  Enter (approve)\tkey Enter'
+        $'y  Yes\tkey y'
+        $'n  No\tkey n'
+        $'1\tkey 1'
+        $'2\tkey 2'
+        $'3\tkey 3'
+        $'Esc\tkey Escape'
+        $'^C  Interrupt\tkey C-c'
+        $'↑  Up\tkey Up'
+        $'↓  Down\tkey Down'
+        $'Type a reply...\ttext'
+        $'Open full session\topen'
+        $'Back\tback'
+    )
+    while :; do
+        sel=$(printf '%s\n' "${rows[@]}" | fzf --reverse --no-sort --no-scrollbar \
+            --delimiter=$'\t' --with-nth=1 --header "$pane" \
+            --preview "$SELF read --pane '$pane' --lines 40 --ansi" \
+            --preview-window 'up,45%,wrap') || return 0
+        act=${sel##*$'\t'}
+        case $act in
+        key\ *) "$SELF" send --pane "$pane" --key "${act#key }" || true ;;
+        text)
+            read -r -e -p 'reply> ' text || return 0
+            [[ -z $text ]] || "$SELF" send --pane "$pane" --text "$text" --key Enter || true
+            ;;
+        open)
+            mobile_open "$pane"
+            return 0
+            ;;
+        *) return 0 ;;
+        esac
     done
-    local sel
-    sel=$(printf '%s\n' "${rows[@]}" | fzf --ansi --reverse \
-        --delimiter=$'\t' --with-nth=1 \
-        --preview "$SELF read --pane {2} --lines 20 --ansi" \
-        --preview-window 'right,60%,border-left') || return 0
-    goto_pane "${sel##*$'\t'}"
+}
+
+cmd_mobile() {
+    command -v fzf >/dev/null 2>&1 || {
+        echo "tmux-agent mobile needs fzf" >&2
+        return 1
+    }
+    local sel port ticker='' reload
+    local -a listen=()
+    reload="reload($SELF mobile-rows)"
+    if fzf --help 2>/dev/null | grep -q -- '--listen' && command -v curl >/dev/null 2>&1; then
+        port=$((20000 + RANDOM % 20000))
+        listen=("--listen=$port")
+    fi
+    while :; do
+        if [[ -z $(mobile_rows) ]]; then
+            echo "no agent panes (retrying, Ctrl-C to quit)" >&2
+            sleep 3
+            continue
+        fi
+        if ((${#listen[@]})); then
+            # Refresh the list every 2s through fzf's listen port.
+            (while sleep 2; do
+                curl -s -XPOST "localhost:$port" -d "$reload" >/dev/null 2>&1 || break
+            done) &
+            ticker=$!
+        fi
+        sel=$(mobile_rows | fzf --ansi --reverse --no-sort --no-scrollbar ${listen[@]+"${listen[@]}"} \
+            --delimiter=$'\t' --with-nth=1 --header 'tap an agent' \
+            --bind "ctrl-r:$reload" \
+            --preview "$SELF read --pane {2} --lines 40 --ansi" \
+            --preview-window 'bottom,55%,wrap') || sel=''
+        [[ -z $ticker ]] || kill "$ticker" 2>/dev/null || true
+        ticker=''
+        [[ -n $sel ]] || return 0
+        mobile_menu "${sel##*$'\t'}"
+    done
 }
 
 cmd_remotes() {
@@ -825,6 +922,9 @@ main() {
     attach) cmd_attach "$@" ;;
     focus) cmd_focus "$@" ;;
     remotes) cmd_remotes ;;
+    send) cmd_send "$@" ;;
+    mobile) cmd_mobile ;;
+    mobile-rows) mobile_rows ;;
     remote-refresh) cmd_remote_refresh ;;
     watch) cmd_watch ;;
     *)

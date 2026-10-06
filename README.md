@@ -222,7 +222,7 @@ Run `tmux-agent` with no arguments for the full list.
 ## Development
 
 ```sh
-shellcheck bin/tmux-agent lib/engine.sh lib/remote.sh lib/install-hooks lib/raise tmux-agentic.tmux
+shellcheck bin/tmux-agent lib/engine.sh lib/remote.sh lib/notify.sh lib/pick.sh lib/install-hooks lib/raise tmux-agentic.tmux
 pytest tests
 ```
 

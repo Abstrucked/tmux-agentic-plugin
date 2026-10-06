@@ -1211,6 +1211,46 @@ class RemoteTests(unittest.TestCase):
         self.assertEqual(again[1], "--\n")
         self.assertGreaterEqual(time.time() - t, 3)
 
+    def test_send_types_into_agent_panes_in_order(self):
+        self.local("%1", "blocked")
+        r = self.cli("send", "--pane", "%1", "--key", "y", "--text", "go on; rm -rf /", "--key", "Enter")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        sent = [c for c in self.tmux_calls() if c.startswith("send-keys")]
+        self.assertEqual(sent, ["send-keys -t %1 y",
+                                "send-keys -t %1 -l -- go on; rm -rf /",
+                                "send-keys -t %1 Enter"])
+
+    def test_send_refuses_other_panes_and_unlisted_keys(self):
+        self.local("%1", "blocked")
+        r = self.cli("send", "--pane", "%9", "--key", "y")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not an agent pane", r.stderr)
+        for key in ("C-d", "M-x", "F1", "yy", ""):
+            r = self.cli("send", "--pane", "%1", "--key", key)
+            self.assertEqual(r.returncode, 2, key)
+        self.assertEqual([c for c in self.tmux_calls() if c.startswith("send-keys")], [])
+        self.assertEqual(self.cli("send", "--pane", "%1").returncode, 2)
+
+    def test_send_to_a_remote_pane_is_forwarded_to_its_host(self):
+        self.answer("devbox", "blocked|claude|%3|main:1.2|@2|0|/src\n")
+        self.fetch()
+        r = self.cli("send", "--pane", f"{self.KEY}/%3", "--key", "y", "--text", "it's fine")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        call = self.ssh_calls()[-1]
+        self.assertIn("tmux-agent send --pane %3 --key y --text", call)
+        self.assertIn("it\\'s\\ fine", call)
+
+    def test_mobile_rows_are_one_short_line_per_agent(self):
+        self.local("%1", "blocked")
+        self.answer("devbox", "working|codex|%3|main:1.2|@2|40|/src/api\n")
+        self.fetch()
+        r = self.cli("mobile-rows")
+        rows = r.stdout.splitlines()
+        self.assertEqual(len(rows), 2, r.stdout)
+        self.assertRegex(rows[0], r"^\S+ claude  app  \S+\t%1$")
+        self.assertRegex(rows[1], rf"^\S+ codex@devbox  api  \S+\t{re.escape(self.KEY)}/%3$")
+        self.assertTrue(all(len(x.split("\t")[0]) < 45 for x in rows))
+
     def test_hosts_that_leave_are_forgotten(self):
         self.answer("devbox", "idle|claude|%3|main:1.2|@2|0|/src\n")
         self.fetch()
