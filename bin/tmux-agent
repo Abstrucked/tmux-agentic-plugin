@@ -23,6 +23,8 @@
 #   install-hooks [--remove] [claude|codex|opencode ...]
 #                        wire the agents' hooks up (or remove them)
 #   place-strip [--max N]  centre the strip in the status bar
+#   nested-status        move or hide the status bar of sessions attached only
+#                        from inside another tmux (client hooks)
 #   attach [--next|--urgent] [--from <pane>]
 #                        jump to the most urgent agent pane; --urgent only
 #                        to blocked, then ready ones (prefix + A), cycling
@@ -546,6 +548,51 @@ cmd_place_strip() {
     fi
 }
 
+cmd_nested_status() {
+    # A tmux attached from inside another one (ssh, or a remote jump) would
+    # stack its status bar on top of the outer one. @tmux-agent-nested-status
+    # top (default) or bottom moves it, hide turns it off, off leaves it.
+    # status and status-position are session options, so a session changes
+    # only while every client on it is nested: its terminal is tmux or
+    # screen. @tmux-agent-nested records what was applied, so unsetting it
+    # brings back the global setting. Runs from the client hooks.
+    local mode sid term type applied want
+    local -A nested=() direct=()
+    mode=$(tmux show-option -gqv @tmux-agent-nested-status 2>/dev/null || true)
+    mode=${mode:-top}
+    [[ $mode == top || $mode == bottom || $mode == hide ]] || mode=off
+    while IFS='|' read -r sid term type; do
+        [[ -n $sid ]] || continue
+        if [[ $term == tmux* || $term == screen* || $type == tmux* ]]; then
+            nested[$sid]=1
+        else
+            direct[$sid]=1
+        fi
+    done < <(tmux list-clients -F '#{session_id}|#{client_termname}|#{client_termtype}' 2>/dev/null || true)
+    while IFS='|' read -r sid applied; do
+        [[ -n $sid ]] || continue
+        want=''
+        if [[ $mode != off && -n ${nested[$sid]:-} && -z ${direct[$sid]:-} ]]; then
+            want=$mode
+        fi
+        [[ $want != "$applied" ]] || continue
+        # A session can close meanwhile; carry on with the others.
+        case $applied in
+        top | bottom) tmux set-option -u -t "$sid" status-position || true ;;
+        hide) tmux set-option -u -t "$sid" status || true ;;
+        esac
+        case $want in
+        top | bottom) tmux set-option -t "$sid" status-position "$want" || true ;;
+        hide) tmux set-option -t "$sid" status off || true ;;
+        esac
+        if [[ -n $want ]]; then
+            tmux set-option -t "$sid" @tmux-agent-nested "$want" || true
+        else
+            tmux set-option -u -t "$sid" @tmux-agent-nested || true
+        fi
+    done < <(tmux list-sessions -F '#{session_id}|#{@tmux-agent-nested}' 2>/dev/null || true)
+}
+
 goto_remote() {
     # $1 "<key>/<pane>", $2 client name (optional). Each host gets one local
     # window, tagged @tmux-agent-remote, running a nested tmux client over
@@ -821,6 +868,7 @@ main() {
     report) cmd_report "$@" ;;
     hook) cmd_hook "$@" || true ;;
     place-strip) cmd_place_strip "$@" ;;
+    nested-status) cmd_nested_status ;;
     install-hooks) "$(dirname "$SELF")/../lib/install-hooks" "$@" ;;
     attach) cmd_attach "$@" ;;
     focus) cmd_focus "$@" ;;

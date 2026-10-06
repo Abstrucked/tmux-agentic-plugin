@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A tmux attached from inside another one, over ssh or by a remote jump,
+  moves its status bar to the top of the pane, so the two bars no longer
+  stack at the bottom. `@tmux-agent-nested-status` takes `top` (default),
+  `bottom`, `hide` or `off`. Only sessions whose clients are all nested
+  change, and they get their own setting back once one is not.
+
 - Agents on other machines show up next to local ones, as `claude@devbox`,
   in the strip, the picker and `prefix + A`, and notify when they get
   blocked or finish. Hosts are the ssh aliases in `@tmux-agent-remotes`,

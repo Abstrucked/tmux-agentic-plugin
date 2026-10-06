@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # tmux-agentic-plugin -- TPM entry point. Binds the agent picker and the
-# jump-to-urgent key, puts the agent strip in the status bar and marks agent
-# panes as seen on focus.
+# jump-to-urgent key, puts the agent strip in the status bar, marks agent
+# panes as seen on focus and keeps a nested tmux's status bar off the outer
+# one.
 #
 # Options (set before TPM runs):
 #   @tmux-agent-key             picker key after the prefix (default a, off: none)
@@ -28,8 +29,12 @@
 #   @tmux-agent-ssh-sockets     ControlMaster socket glob (~/.ssh/master-*)
 #   @tmux-agent-remote-command  runs tmux-agent on a remote host (default:
 #                               looks in TPM's plugin directories)
-# The remote options are read on every refresh, so they apply without a
-# reload.
+#   @tmux-agent-nested-status   status bar of a session attached from inside
+#                               another tmux: top (default) or bottom moves it
+#                               out of the outer bar's way, hide drops it, off
+#                               leaves it
+# The remote and nested options are read each time they are used, so they
+# apply without a reload.
 #
 # Agent hooks are opt-in: run bin/tmux-agent install-hooks once.
 set -euo pipefail
@@ -54,11 +59,22 @@ interpolate() {
     done
 }
 
-focus_hook() {
+add_hook() {
+    # $1 hook, $2 tmux-agent arguments. Appended so the user's own hooks
+    # stay; skipped on reloads.
+    tmux show-hooks -g "$1" 2>/dev/null | grep -qF "$BIN" && return 0
+    tmux set-hook -ga "$1" "run-shell \"'$BIN' $2\""
+}
+
+hooks() {
     # Focusing an agent pane marks its finished state as seen (ready ->
-    # idle). Appended so the user's own hooks stay; skipped on reloads.
-    tmux show-hooks -g pane-focus-in 2>/dev/null | grep -qF "$BIN" && return 0
-    tmux set-hook -ga pane-focus-in "run-shell \"'$BIN' seen #{pane_id}\""
+    # idle). Attaching from inside another tmux moves or hides the nested
+    # status bar (bin/tmux-agent nested-status).
+    local hook
+    add_hook pane-focus-in 'seen #{pane_id}'
+    for hook in client-attached client-detached client-session-changed; do
+        add_hook "$hook" nested-status
+    done
 }
 
 main() {
@@ -82,7 +98,9 @@ main() {
         tmux bind-key "$urgent_key" run-shell \
             "'$BIN' attach --urgent --from '#{pane_id}' 2>/dev/null || tmux display-message 'no agent needs you'"
     fi
-    focus_hook
+    hooks
+    # Clients attached before a reload, or a changed option.
+    "$BIN" nested-status || true
     case $position in
     centre | center) "$BIN" place-strip ${max:+--max "$max"} ;;
     off) ;;

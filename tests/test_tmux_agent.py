@@ -341,6 +341,67 @@ class CliSmokeTests(unittest.TestCase):
                 log.read_text().splitlines(),
             )
 
+    def run_nested_status(self, mode, clients, sessions):
+        # clients: "session|termname|termtype" lines; sessions:
+        # "session|applied" lines. Returns the set-option calls issued.
+        with tempfile.TemporaryDirectory(prefix="ta-nested-") as directory:
+            log = fake_tmux(directory, {
+                "show-option -gqv @tmux-agent-nested-status": mode,
+                "list-clients -F #{session_id}|#{client_termname}|#{client_termtype}":
+                    "".join(f"{c}\n" for c in clients),
+                "list-sessions -F #{session_id}|#{@tmux-agent-nested}":
+                    "".join(f"{x}\n" for x in sessions),
+            })
+            r = subprocess.run(
+                [str(CLI), "nested-status"], capture_output=True, text=True,
+                env={**os.environ, "PATH": f"{directory}:{os.environ['PATH']}"},
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return [c for c in log.read_text().splitlines()
+                    if c.startswith("set-option")]
+
+    def test_nested_status_moves_bar_of_sessions_attached_only_from_tmux(self):
+        calls = self.run_nested_status("", [
+            "$1|tmux-256color|", "$2|tmux-256color|", "$2|xterm-ghostty|",
+        ], ["$1|", "$2|", "$3|"])
+        self.assertEqual(calls, [
+            "set-option -t $1 status-position top",
+            "set-option -t $1 @tmux-agent-nested top",
+        ])
+
+    def test_nested_status_detects_tmux_from_its_version_reply(self):
+        calls = self.run_nested_status("bottom", ["$1|xterm-256color|tmux 3.7c"], ["$1|"])
+        self.assertIn("set-option -t $1 status-position bottom", calls)
+
+    def test_nested_status_restores_a_session_once_not_nested(self):
+        calls = self.run_nested_status("top", ["$1|xterm-ghostty|"], ["$1|top", "$2|top"])
+        self.assertEqual(calls, [
+            "set-option -u -t $1 status-position",
+            "set-option -u -t $1 @tmux-agent-nested",
+            "set-option -u -t $2 status-position",
+            "set-option -u -t $2 @tmux-agent-nested",
+        ])
+
+    def test_nested_status_hide_turns_the_bar_off_after_undoing_top(self):
+        calls = self.run_nested_status("hide", ["$1|screen-256color|"], ["$1|top"])
+        self.assertEqual(calls, [
+            "set-option -u -t $1 status-position",
+            "set-option -t $1 status off",
+            "set-option -t $1 @tmux-agent-nested hide",
+        ])
+
+    def test_nested_status_off_only_undoes_earlier_changes(self):
+        calls = self.run_nested_status("off", ["$1|tmux-256color|", "$2|tmux-256color|"],
+                                       ["$1|hide", "$2|"])
+        self.assertEqual(calls, [
+            "set-option -u -t $1 status",
+            "set-option -u -t $1 @tmux-agent-nested",
+        ])
+
+    def test_nested_status_leaves_an_applied_session_alone(self):
+        self.assertEqual(
+            self.run_nested_status("top", ["$1|tmux-256color|"], ["$1|top"]), [])
+
     def test_strip_shows_every_pane_with_distinct_state_colors(self):
         self.assertEqual(
             self.run_strip(self.MIXED_AGENTS),
@@ -813,6 +874,8 @@ class EntryPointTests(unittest.TestCase):
                       " 2>/dev/null || tmux display-message 'no agent needs you'", calls)
         self.assertIn(f"set-hook -ga pane-focus-in run-shell \"'{CLI}' seen #{{pane_id}}\"",
                       calls)
+        for hook in ("client-attached", "client-detached", "client-session-changed"):
+            self.assertIn(f"set-hook -ga {hook} run-shell \"'{CLI}' nested-status\"", calls)
         self.assertIn(f"set-option -gq status-right #[fg=blue]#('{CLI}' strip) host", calls)
         self.assertFalse([c for c in calls if c.startswith("set-option -gq status-left")])
 
@@ -828,12 +891,15 @@ class EntryPointTests(unittest.TestCase):
         self.assertIn(f"set -g status-format[0] L#[nolist align=absolute-centre]"
                       f"#('{CLI}' strip --max 6)#[nolist align=right R", calls)
 
-    def test_focus_hook_is_not_added_twice(self):
+    def test_hooks_are_not_added_twice(self):
         calls = self.run_entry({
             "show-hooks -g pane-focus-in":
                 f"pane-focus-in[0] run-shell \"'{CLI}' seen #{{pane_id}}\"",
+            "show-hooks -g client-attached":
+                f"client-attached[0] run-shell \"'{CLI}' nested-status\"",
         })
-        self.assertFalse([c for c in calls if c.startswith("set-hook")])
+        hooks = [c.split()[2] for c in calls if c.startswith("set-hook")]
+        self.assertEqual(hooks, ["client-detached", "client-session-changed"])
 
 
 @unittest.skipUnless(shutil.which("node"), "node not installed")

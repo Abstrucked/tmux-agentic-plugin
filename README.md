@@ -126,6 +126,28 @@ its `bin/tmux-agent`. `tailscale ssh` opens no ControlMaster connection, so
 list such hosts in `@tmux-agent-remotes`; plain `ssh` over the tailnet
 works. `tmux-agent remotes` shows each host and how its last fetch went.
 
+### Nested tmux
+
+Attaching a tmux from inside another one (ssh to a host, then `tmux attach`,
+or a remote jump) would stack its status bar on top of yours. The inner
+tmux moves its bar to the top of the pane instead, so yours stays alone at
+the bottom.
+
+```tmux
+set -g @tmux-agent-nested-status hide   # or: top (default), bottom, off
+```
+
+`hide` drops the inner bar; remote agents still show in your strip as
+`agent@host`. `bottom` is for when your own bar is at the top. `off` leaves
+it alone.
+
+This runs on the inner host, so that host needs this plugin, as it does for
+remote agents. A client counts as nested when its terminal is tmux or
+screen: the outer tmux's `default-terminal` is `tmux-*` or `screen-*`, which
+ssh passes on as `TERM`. The bar is a session option, so it only moves while
+every client on that session is nested; someone attached directly keeps it
+where it was, and detaching puts it back.
+
 ### Clicking notifications
 
 Clicking a notification switches a tmux client to that agent's session,
@@ -174,6 +196,7 @@ window is one of its ancestors.
 | `@tmux-agent-remote-interval` | `10`          | seconds between fetches from remote hosts |
 | `@tmux-agent-ssh-sockets`     | `~/.ssh/master-*` | glob matching your ControlMaster sockets |
 | `@tmux-agent-remote-command`  | TPM paths     | command that runs `tmux-agent` on a remote host |
+| `@tmux-agent-nested-status`  | `top`         | status bar of a session attached from inside another tmux: `top` or `bottom` moves it, `hide` drops it, `off` leaves it (see [Nested tmux](#nested-tmux)) |
 
 Set options before the `@plugin` line runs, that is, above TPM's `run` line.
 
