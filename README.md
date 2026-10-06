@@ -13,20 +13,31 @@ agent CLIs running in any pane, and tracks each one's state:
 | Mark | State   | Meaning                                 |
 |------|---------|-----------------------------------------|
 | ◆    | blocked | needs input or approval (red)           |
+| ✖    | error   | last turn ended on an API error (magenta) |
 | ●    | working | actively running (yellow)               |
 | ◉    | ready   | finished, you have not looked yet (blue)|
 | ○    | idle    | finished and seen (green, name dimmed)  |
+
+`error` is a turn that ended on an API error (rate limit, overload, billing),
+reported by Claude Code's `StopFailure` hook. Like ready, it becomes idle once
+you look at it.
 
 - **Status bar strip**: one `mark name` per agent, most urgent first. Past
   four agents it switches to counts per state (`◆ codex  ● 5  ○ 3`), and keeps
   blocked agents named while there are at most two.
 - **Picker** (`prefix + a`): an fzf popup over every agent pane with a live
-  preview. Enter switches to that pane, in any session.
+  preview. Enter switches to that pane, in any session. It can also approve,
+  deny, reply to and diff an agent without leaving the popup (see
+  [Picker keys](#picker-keys)).
 - **Jump** (`prefix + A`): straight to the next blocked agent, then to
   finished ones you have not looked at. Press again to cycle through them.
-- **Desktop notifications** when an agent you are not looking at gets
-  blocked or finishes. Click one to jump to that pane, with its terminal
-  window raised on its workspace.
+- **Notifications** when an agent you are not looking at gets blocked,
+  hits an error or finishes: desktop, in your terminal, or through a command
+  of your own such as a phone push. Click a desktop one to jump to that pane,
+  with its terminal window raised on its workspace.
+- **Why it stopped**: notifications and the picker show what the hook
+  reported: the command awaiting permission, the question, the first line of
+  the final answer, or the error.
 - **Exact states through agent hooks** (optional): Claude Code, Codex and
   OpenCode report their own lifecycle. Without hooks, state is inferred
   from pane output and CPU use.
@@ -37,10 +48,16 @@ agent CLIs running in any pane, and tracks each one's state:
 
 - tmux 3.2+ (`display-popup`)
 - bash 4+ (on macOS: `brew install bash`)
-- [fzf](https://github.com/junegunn/fzf) for the picker
-- jq for `install-hooks` and `status --json`
-- Linux or macOS. Notifications use `notify-send` or `osascript`; clicking
-  them works with `notify-send` (see [Clicking notifications](#clicking-notifications)).
+- [fzf](https://github.com/junegunn/fzf) for the picker. Its actions need any
+  recent fzf; the error line in the picker header needs 0.40+; the
+  auto-refreshing list needs 0.43+ and curl (otherwise press ctrl-l)
+- jq for `install-hooks` and `status --json`. It also lets hooks record why
+  an agent stopped (optional; without it everything else works)
+- Linux or macOS. Desktop notifications use `notify-send` or `osascript`;
+  clicking them works with `notify-send` (see
+  [Clicking notifications](#clicking-notifications)). Terminal notifications
+  need nothing but a terminal that supports them (see
+  [Notifications](#notifications)).
 
 ## Install
 
@@ -83,6 +100,10 @@ the plugin:
 Re-running replaces earlier tmux-agent entries and leaves your other hooks
 alone. `install-hooks --remove` takes them out again.
 
+Claude Code hooks now include `StopFailure`, which reports the `error` state.
+If you installed hooks earlier, re-run `install-hooks claude` after updating.
+The Claude Code plugin below gets it automatically.
+
 TPM installs to `~/.config/tmux/plugins/` instead of `~/.tmux/plugins/` when
 your config lives in `~/.config/tmux`. Adjust the paths above to match.
 
@@ -100,6 +121,89 @@ installed with TPM or manually, for the strip and the picker. Use either this
 or `install-hooks claude`; running both is harmless, since repeated hook
 events with the same state are ignored. Codex and OpenCode hooks still come
 from `install-hooks`.
+
+### Picker keys
+
+| Key      | Action |
+|----------|--------|
+| enter    | switch to the pane |
+| ctrl-y   | approve: sends the agent's approve key (claude `1`, codex `y`), only while it is still blocked; refused otherwise |
+| ctrl-n   | deny, or interrupt a working agent: sends Esc (claude, codex, opencode) |
+| ctrl-e   | type a reply and send it with Enter |
+| ctrl-s   | mark the agent seen |
+| ctrl-d   | toggle the preview between the pane and a git diff of its directory |
+| ctrl-l   | reload the list |
+
+A refused or failed action shows its reason in the header (fzf 0.40+).
+
+### Notifications
+
+`@tmux-agent-notify-method` picks where they go:
+
+| Method    | Effect |
+|-----------|--------|
+| `auto`    | desktop when a notification daemon and display are reachable (or on macOS), otherwise terminal |
+| `desktop` | `notify-send` or `osascript` |
+| `terminal` | ask every attached terminal to show it |
+| `off`     | none, including the notify command |
+
+`@tmux-agent-notify off` silences everything too.
+
+**Terminal notifications** work over ssh and on macOS, with no display. The
+plugin writes an escape sequence straight to each tmux client's terminal, so
+no tmux passthrough setting is needed. The sequence is chosen from the
+client's `TERM`: OSC 9 (iTerm2, Ghostty, WezTerm and the default), OSC 777
+(foot, Konsole and other VTE terminals, rxvt) or kitty's OSC 99. Force one
+with `@tmux-agent-osc` set to `9`, `777` or `99`.
+
+**Notify command.** `@tmux-agent-notify-command` runs a command of yours in
+addition to the method, through `bash -c`. The notification is passed only in
+the environment, never in the command string:
+
+| Variable     | Value |
+|--------------|-------|
+| `TA_TITLE`   | e.g. `claude needs input` |
+| `TA_BODY`    | the detail line, then directory and tmux target; may hold text the agent wrote |
+| `TA_STATE`   | `blocked`, `error` or `ready` |
+| `TA_AGENT`   | agent name |
+| `TA_PANE`    | pane id |
+| `TA_PATH`    | the agent's working directory |
+| `TA_URGENCY` | `critical` (blocked, error) or `normal` |
+
+**Phone push.** Put the token in a small script, not in `tmux.conf`:
+
+```sh
+#!/usr/bin/env bash
+# ~/.local/bin/agent-push (chmod 700); secrets in ~/.config/agent-push.env (chmod 600)
+set -eu
+. ~/.config/agent-push.env     # NTFY_TOPIC=..., PUSHOVER_TOKEN=..., PUSHOVER_USER=..., TG_TOKEN=..., TG_CHAT=...
+prio=default; [[ $TA_URGENCY == critical ]] && prio=high
+
+# ntfy
+curl -s -m 10 -H "Title: $TA_TITLE" -H "Priority: $prio" --data-raw "$TA_BODY" "https://ntfy.sh/$NTFY_TOPIC"
+
+# Pushover (priority 1 is high)
+curl -s -m 10 --form-string "token=$PUSHOVER_TOKEN" --form-string "user=$PUSHOVER_USER" \
+    --form-string "title=$TA_TITLE" --form-string "message=$TA_BODY" \
+    --form-string "priority=$([[ $TA_URGENCY == critical ]] && echo 1 || echo 0)" \
+    https://api.pushover.net/1/messages.json
+
+# Telegram
+curl -s -m 10 --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "text=$TA_TITLE: $TA_BODY" \
+    "https://api.telegram.org/bot$TG_TOKEN/sendMessage"
+```
+
+Keep one of the three blocks. Then:
+
+```tmux
+set -g @tmux-agent-notify-command '~/.local/bin/agent-push'
+```
+
+The curl flags matter. `TA_BODY` can hold text the agent wrote, and curl's
+`-d "$X"` and `-F "k=$X"` read a file when the value starts with `@` (`<` for
+`-F`), so an agent whose last message is `@~/.ssh/id_ed25519` would have that
+file uploaded. `--data-raw` and `--form-string` never do, and a `text=` prefix
+keeps `--data-urlencode` safe.
 
 ### Remote agents
 
@@ -143,6 +247,27 @@ its `bin/tmux-agent`. `tailscale ssh` opens no ControlMaster connection, so
 list such hosts in `@tmux-agent-remotes`; plain `ssh` over the tailnet
 works. `tmux-agent remotes` shows each host and how its last fetch went.
 
+### From a phone
+
+`tmux-agent mobile` is a tap-friendly list of every agent this host can see
+(its own and the remote ones) with a live preview of the selected pane.
+Tap an agent for a menu of big rows: Enter, `y`, `n`, `1`-`3`, Esc,
+Ctrl-C, arrows, "Type a reply..." and "Open full session". Each key goes
+to the agent's pane (`tmux-agent send`), remote ones over ssh, and the
+preview shows what happened.
+
+With Termius: install Tailscale on the phone, add the host by its tailnet
+name (Tailscale SSH needs no keys), and set its startup command to
+`~/.config/tmux/plugins/tmux-agentic-plugin/bin/tmux-agent mobile` (use
+`~/.tmux/plugins/...` if that is where TPM put it). Turn on mouse support
+so taps select rows. Any host works as the entry point, since each one
+lists the others it can reach. Needs fzf; the list refreshes itself when
+curl is installed too, otherwise Ctrl-R.
+
+`send` accepts only agent panes and a short list of keys (Enter, Escape,
+Tab, Space, BSpace, the arrows, Ctrl-C, `y n Y N` and digits); `--text`
+is typed literally, never run.
+
 ### Clicking notifications
 
 Clicking a notification switches a tmux client to that agent's session,
@@ -182,7 +307,10 @@ window is one of its ancestors.
 | `@tmux-agent-popup-size`      | `80%`         | picker popup width and height |
 | `@tmux-agent-strip-position`  | `interpolate` | `interpolate`: replace `#{agent_status}` in `status-left`/`status-right`; `centre`: put the strip in the middle of the status bar; `off`: no strip |
 | `@tmux-agent-strip-max`       | `4`           | agents shown by name before switching to counts |
-| `@tmux-agent-notify`          | `on`          | desktop notifications; `off` to silence |
+| `@tmux-agent-notify`          | `on`          | notifications; `off` to silence all |
+| `@tmux-agent-notify-method`   | `auto`        | `auto`, `desktop`, `terminal` or `off` (see [Notifications](#notifications)) |
+| `@tmux-agent-osc`             | from `TERM`   | force the terminal notification sequence: `9`, `777` or `99` |
+| `@tmux-agent-notify-command`  | empty         | command run on every notification, with `TA_*` variables; for phone push |
 | `@tmux-agent-raise-command`   | detected      | raises the terminal window when a notification is clicked; a command (gets the client PID) or `off` |
 | `@tmux-agent-remotes`         | empty         | ssh aliases whose agents to show (see [Remote agents](#remote-agents)) |
 | `@tmux-agent-remote-discover` | `on`          | also ask hosts with a live ssh ControlMaster connection; `off` for the list only |
@@ -200,12 +328,19 @@ Set options before the `@plugin` line runs, that is, above TPM's `run` line.
 
 ```
 tmux-agent status [--json] [--remote]   list agent panes and states;
-                               --remote adds agents on other hosts
+                               --remote adds agents on other hosts;
+                               --json includes each agent's detail
 tmux-agent status --porcelain  this host's agents, for other hosts to fetch
 tmux-agent remotes             remote hosts and their last fetch
 tmux-agent attach --next       jump to the most urgent agent pane
 tmux-agent attach --urgent [--from %3]   next blocked/ready pane, after %3
 tmux-agent focus --pane %3     switch a client to %3 and raise its terminal
+tmux-agent send --pane %3 (--key K | --text T)... [--expect-state blocked]
+                               type into an agent pane; exits 3 without
+                               typing unless it is in that state
+tmux-agent mobile              tap-friendly agent list for a phone terminal
+tmux-agent detail --pane %3    why the agent stopped, as its hook reported
+tmux-agent diff --pane %3      git diff of the pane's directory
 tmux-agent wait --pane %3 --state ready [--timeout 600]
 tmux-agent window-dot @1       rollup state dot, for window-status-format
 tmux-agent pane-label %3       agent + state, for pane-border-format
