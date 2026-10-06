@@ -78,5 +78,16 @@ class DetailEpochTests(unittest.TestCase):
             self.assertEqual((r.returncode, r.stdout), (1, ""), c)
 
 
+class AgentNameForkFreeTests(unittest.TestCase):
+    def test_matches_without_any_external_command(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = bash('PATH="$1"; '
+                     'ta_agent_name_of bash "node /usr/lib/Codex/bin/codex --x"; '
+                     'ta_agent_name_of /usr/bin/claude ""; '
+                     '! ta_agent_name_of vim "vim notes.txt"', d)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout.split(), ["codex", "claude"])
+
+
 if __name__ == "__main__":
     unittest.main()

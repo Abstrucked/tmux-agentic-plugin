@@ -344,8 +344,14 @@ class StatusDetailTests(Sandbox):
 class SendExpectStateTests(Sandbox):
     def setUp(self):
         super().setUp()
-        self.log = fake_tmux(self.fake)
+        # A guarded send forces a rescan, which drops panes tmux does not
+        # list and agents nothing vouches for: list %1 and report it ready.
+        self.log = fake_tmux(self.fake, {
+            "list-panes -a -F #{pane_id}|#{pane_pid}|#{window_id}|"
+            "#{session_name}:#{window_index}.#{pane_index}|#{pane_current_path}":
+                "%1|1|@1|main:1.1|/project\n"})
         self.state_file("%1", "ready")
+        (self.state / "report-%1").write_text(f"ready|{int(time.time())}\n")
 
     def sent(self):
         return [c for c in self.log.read_text().splitlines() if c.startswith("send-keys")] \
@@ -374,7 +380,7 @@ class DetailDiffTests(Sandbox):
         r = self.cli("detail", "--pane", "%2")
         self.assertEqual((r.returncode, r.stdout), (0, ""))
 
-    def test_detail_for_remote_ids_is_empty(self):
+    def test_detail_for_unknown_remote_hosts_is_empty(self):
         r = self.cli("detail", "--pane", "u@h:22/%1")
         self.assertEqual((r.returncode, r.stdout), (0, ""))
 

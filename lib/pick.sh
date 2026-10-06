@@ -15,16 +15,20 @@ pad() {
 
 pick_rows() {
     # One agent per line, most urgent first: mark, agent, directory, target and
-    # age, then a dim detail column (local panes only), then the pane id and
-    # the bare agent name after tabs. fzf shows field 1 only. Fails when there
-    # are no agents.
-    local st ag host tgt age id path i d
-    local -a sts=() ags=() dirs=() tgts=() ages=() panes=() names=() dets=()
+    # age, then a dim detail column (local panes only), then the pane id, the
+    # bare agent name and the detail epoch (local panes only) after tabs. fzf
+    # shows field 1 only. Fails when there are no agents.
+    local st ag host tgt age id path i d e
+    local -a sts=() ags=() dirs=() tgts=() ages=() panes=() names=() dets=() epochs=()
     while IFS='|' read -r st ag host tgt age id path; do
         sts+=("$st") ags+=("$ag${host:+@$host}") dirs+=("${path##*/}") tgts+=("$tgt")
         panes+=("$id") ages+=("$(age_str "$age")") names+=("$ag")
-        d=''
-        [[ $id == */* ]] || d=$(ta_detail_read "$TA_STATE_DIR" "$id" 2>/dev/null) || d=''
+        d='' e=''
+        if [[ $id != */* ]]; then
+            d=$(ta_detail_read "$TA_STATE_DIR" "$id" 2>/dev/null) || d=''
+            e=$(ta_detail_epoch "$TA_STATE_DIR" "$id" 2>/dev/null) || e=''
+        fi
+        epochs+=("$e")
         dets+=("$(ta_sanitize "$d" 60)")
     done < <(each_agent)
     ((${#panes[@]})) || return 1
@@ -41,7 +45,7 @@ pick_rows() {
             "$(pad "${ags[i]}" "$wa")" "$(pad "${dirs[i]}" "$wd")" "$(pad "${tgts[i]}" "$wt")" \
             "${ages[i]}"
         [[ -z ${dets[i]} ]] || printf '  \033[2m%s\033[0m' "${dets[i]}"
-        printf '\t%s\t%s\n' "${panes[i]}" "${names[i]}"
+        printf '\t%s\t%s\t%s\n' "${panes[i]}" "${names[i]}" "${epochs[i]}"
     done
 }
 
@@ -63,10 +67,10 @@ pick_msg() {
 }
 
 pick_action() {
-    # $1 action, $2 pane id, $3 agent: what the fzf binds run. fzf quotes the
+    # $1 action, $2 pane id, $3 agent, $4 detail epoch: what the fzf binds run. fzf quotes the
     # placeholders, so row text never reaches a shell unquoted. Failures go to
     # the header, never to the exit status (that would abort the +reload).
-    local act=${1:-} pane=${2:-} agent=${3:-} key err reply
+    local act=${1:-} pane=${2:-} agent=${3:-} epoch=${4:-} key err reply
     case $act in
     approve)
         key=$(ta_approve_key "$agent") || {
@@ -74,7 +78,9 @@ pick_action() {
             return 0
         }
         # Guarded: the pane may have moved on since the list was drawn.
-        if err=$("$SELF" send --pane "$pane" --expect-state blocked --key "$key" 2>&1); then
+        # Also guarded by the request's epoch when the row has one.
+        if err=$("$SELF" send --pane "$pane" --expect-state blocked \
+            ${epoch:+--expect-epoch "$epoch"} --key "$key" 2>&1); then
             pick_msg
         else
             pick_msg "$err"
@@ -94,7 +100,7 @@ pick_action() {
         err=$("$SELF" send --pane "$pane" --text "$reply" --key Enter 2>&1) || pick_msg "$err"
         ;;
     seen)
-        [[ $pane == */* ]] || "$SELF" seen "$pane" || true
+        "$SELF" seen "$pane" || true
         ;;
     toggle)
         [[ -n ${TA_PICK_DIR:-} ]] || return 0
@@ -104,7 +110,7 @@ pick_action() {
         if [[ -n ${TA_PICK_DIR:-} && -e $TA_PICK_DIR/diff ]]; then
             "$SELF" diff --pane "$pane"
         else
-            [[ $pane == */* ]] || "$SELF" detail --pane "$pane"
+            "$SELF" detail --pane "$pane"
             "$SELF" read --pane "$pane" --lines 20 --ansi
         fi
         ;;
@@ -124,9 +130,36 @@ pick_fzf_min() {
     ((ver_have[0] == ver_want[0] && ${ver_have[1]:-0} >= ver_want[1]))
 }
 
+fzf_listen_start() {
+    # $1 fzf action the ticker POSTs every 2 s. Sets FZF_LISTEN_ARGS (for fzf's
+    # argv), FZF_LISTEN_TICKER (the ticker's pid) and exports FZF_API_KEY, a
+    # random key that stops other local users from driving fzf through the
+    # listen port (needs fzf 0.43). Without --listen or curl: empty, no ticker.
+    local action=$1 port
+    declare -g -a FZF_LISTEN_ARGS=()
+    declare -g FZF_LISTEN_TICKER=''
+    pick_fzf_min 0.43 && fzf --help 2>/dev/null | grep -q -- '--listen' &&
+        command -v curl >/dev/null 2>&1 || return 0
+    port=$((20000 + RANDOM % 20000))
+    FZF_API_KEY=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    export FZF_API_KEY
+    FZF_LISTEN_ARGS=("--listen=$port")
+    # The key goes to curl on stdin, not argv, where ps would show it.
+    (while sleep 2; do
+        printf 'header = "x-api-key: %s"\n' "$FZF_API_KEY" |
+            curl -s -K - -XPOST "localhost:$port" -d "$action" >/dev/null 2>&1 || break
+    done) &
+    FZF_LISTEN_TICKER=$!
+}
+
+fzf_listen_stop() {
+    [[ -z ${FZF_LISTEN_TICKER:-} ]] || kill "$FZF_LISTEN_TICKER" 2>/dev/null || true
+    FZF_LISTEN_TICKER=''
+}
+
 pick_cleanup() {
-    # $1 temp dir, $2 ticker pid (may be empty).
-    [[ -z ${2:-} ]] || kill "$2" 2>/dev/null || true
+    # $1 temp dir.
+    fzf_listen_stop
     rm -rf "$1"
 }
 
@@ -136,8 +169,7 @@ cmd_pick() {
         return 1
     }
     refresh
-    local rows sel pane port ticker='' th='' reload dir
-    local -a listen=()
+    local rows sel pane th='' reload dir
     rows=$(pick_rows) || {
         echo "no agent panes" >&2
         return 1
@@ -146,30 +178,17 @@ cmd_pick() {
     export TA_PICK_DIR=$dir
     # Ctrl-C at the shell, a closed popup or a kill must not leave the temp
     # dir or the ticker behind.
-    trap 'pick_cleanup "$dir" "$ticker"; trap - INT TERM HUP; exit 130' INT TERM HUP
+    trap 'pick_cleanup "$dir"; trap - INT TERM HUP; exit 130' INT TERM HUP
     pick_msg
     reload="reload($SELF pick-rows)"
     # transform-header (fzf 0.40) shows the last failure; older fzf keeps the
     # plain key list.
     # shellcheck disable=SC2016 # expanded by fzf's shell, not ours
     pick_fzf_min 0.40 && th='+transform-header(cat "$TA_PICK_DIR/header")'
-    # A random API key stops other local users from driving the picker through
-    # the listen port; FZF_API_KEY needs fzf 0.43.
-    if pick_fzf_min 0.43 && fzf --help 2>/dev/null | grep -q -- '--listen' && command -v curl >/dev/null 2>&1; then
-        port=$((20000 + RANDOM % 20000))
-        FZF_API_KEY=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
-        export FZF_API_KEY
-        listen=("--listen=$port")
-        # The key goes to curl on stdin, not argv, where ps would show it.
-        (while sleep 2; do
-            printf 'header = "x-api-key: %s"\n' "$FZF_API_KEY" |
-                curl -s -K - -XPOST "localhost:$port" -d "$reload" >/dev/null 2>&1 || break
-        done) &
-        ticker=$!
-    fi
-    sel=$(fzf --ansi --reverse --header "$PICK_HEADER" ${listen[@]+"${listen[@]}"} \
+    fzf_listen_start "$reload"
+    sel=$(fzf --ansi --reverse --header "$PICK_HEADER" ${FZF_LISTEN_ARGS[@]+"${FZF_LISTEN_ARGS[@]}"} \
         --delimiter=$'\t' --with-nth=1 \
-        --bind "ctrl-y:execute-silent($SELF pick-action approve {2} {3})$th+$reload" \
+        --bind "ctrl-y:execute-silent($SELF pick-action approve {2} {3} {4})$th+$reload" \
         --bind "ctrl-n:execute-silent($SELF pick-action deny {2} {3})$th+$reload" \
         --bind "ctrl-e:execute($SELF pick-action reply {2} {3})$th+$reload" \
         --bind "ctrl-s:execute-silent($SELF pick-action seen {2} {3})+$reload" \
@@ -177,7 +196,7 @@ cmd_pick() {
         --bind "ctrl-l:$reload" \
         --preview "$SELF pick-action preview {2} {3}" \
         --preview-window 'right,60%,border-left' <<<"$rows") || sel=''
-    pick_cleanup "$dir" "$ticker"
+    pick_cleanup "$dir"
     trap - INT TERM HUP
     [[ -n $sel ]] || return 0
     IFS=$'\t' read -r _ pane _ <<<"$sel"

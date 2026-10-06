@@ -4,6 +4,7 @@ Classification fixtures, detection checks and CLI smoke tests for
 lib/engine.sh, bin/tmux-agent, lib/install-hooks and the TPM entry point.
 """
 
+import contextlib
 import getpass
 import json
 import os
@@ -725,15 +726,37 @@ class HookTests(unittest.TestCase):
                  "TMUX_AGENT_STATE_DIR": state_dir, "TMUX_PANE": pane},
         )
 
-    def test_hook_reports_state_silently(self):
+    @contextlib.contextmanager
+    def hook_dir(self):
         with tempfile.TemporaryDirectory(prefix="ta-hook-") as directory:
+            try:
+                yield directory
+            finally:
+                self.settle(directory)
+
+    @staticmethod
+    def settle(state_dir):
+        """The hook leaves a background rescan writing into state_dir; wait
+        for it (it takes the scan lock) so the directory can be removed."""
+        d = Path(state_dir)
+        deadline = time.time() + 5
+        while not (d / "stamp").exists() and time.time() < deadline:
+            time.sleep(0.02)
+        if shutil.which("flock"):
+            subprocess.run(["flock", str(d / "lock"), "true"], timeout=10)
+        else:
+            while (d / "lock.d").exists() and time.time() < deadline + 10:
+                time.sleep(0.02)
+
+    def test_hook_reports_state_silently(self):
+        with self.hook_dir() as directory:
             r = self.run_hook(directory, "Stop")
             self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
             report = (Path(directory) / "report-%999").read_text()
             self.assertEqual(report.split("|")[0], "ready")
 
     def test_hook_session_end_clears_report(self):
-        with tempfile.TemporaryDirectory(prefix="ta-hook-") as directory:
+        with self.hook_dir() as directory:
             (Path(directory) / "report-%999").write_text("working|1\n")
             r = self.run_hook(directory, "SessionEnd")
             self.assertEqual(r.returncode, 0, r.stderr)
@@ -1382,7 +1405,11 @@ class RemoteTests(unittest.TestCase):
         subprocess.run([str(CLI), "remote-refresh"], env=env, timeout=20)
         self.assertTrue(wait_for(lambda: "switch-client -c /dev/pts/4 -t @7"
                                  in self.tmux_calls()), self.tmux_calls())
-        self.assertIn("claude@devbox needs input api · main:1.2", notified.read_text())
+        # The body carries the detail fetched over ssh (the fake ssh answers
+        # every command with the porcelain line), then the directory.
+        body = notified.read_text()
+        self.assertIn("claude@devbox needs input", body)
+        self.assertIn("api · main:1.2", body)
 
 
 if __name__ == "__main__":
