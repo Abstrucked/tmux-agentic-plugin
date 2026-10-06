@@ -32,5 +32,5 @@ jobs:
         with:
           node-version: "22"
       - run: pip install --require-hashes -r requirements-dev.txt
-      - run: shellcheck bin/tmux-agent lib/engine.sh lib/remote.sh lib/notify.sh lib/pick.sh lib/install-hooks lib/raise tmux-agentic.tmux
+      - run: shellcheck bin/tmux-agent lib/engine.sh lib/remote.sh lib/notify.sh lib/pick.sh lib/doctor.sh lib/install-hooks lib/raise tmux-agentic.tmux
       - run: pytest tests

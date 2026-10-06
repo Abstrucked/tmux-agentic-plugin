@@ -23,6 +23,32 @@
 - `diff --pane <id>` shows the git diff of an agent's directory.
 - Faster scans: one `ps` per scan and fewer pane captures.
 - An interrupted Claude Code turn no longer shows as working for 5 minutes.
+- Approve is trustworthy: `send --expect-state` forces a fresh scan and lets
+  a newer hook report override the cache, and the picker refuses when a new
+  permission request replaced the one you saw.
+- `StopFailure` details come from Claude Code's `error` and `error_details`.
+- `prefix + A` and `attach --urgent` include agents in error: blocked, then
+  error, then ready.
+- OpenCode: a pane showing several sessions follows all of them, and a failed
+  run reports error instead of ready.
+- Codex: `install-hooks codex` adds `Interrupt` (an interrupted turn reads
+  ready), keeps `SessionEnd` and `Interrupt` within Codex's 3 s hook limit,
+  and reminds you to trust the hooks in `/hooks`. Hooks are on by default, so
+  it warns only when `config.toml` turns them off.
+- `auto` notifications count a D-Bus session bus as a reachable desktop.
+- Remote agents can be marked seen and show `detail`, and `wait` works on
+  them (`<host-key>/<pane>` ids).
+- State is per tmux server in a private (0700) directory, preferring
+  `$XDG_RUNTIME_DIR`. It held prompt and command details in a shared,
+  world-readable `/tmp/tmux-agent-<uid>`, which you can now delete.
+- `mobile`'s listen port needs the same random key as the picker's, so other
+  local users can't drive it, and it cleans up when interrupted.
+- Much faster scans: agent detection no longer runs a grep per process name.
+- `tmux-agent doctor` checks the install, and `explain --pane <id>` shows why
+  a pane has its state.
+
+Upgrading: re-run `install-hooks codex`, then trust the hooks in `/hooks` in
+Codex.
 
 ## 0.2.0 (2026-10-06)
 

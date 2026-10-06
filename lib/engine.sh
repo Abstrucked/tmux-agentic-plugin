@@ -121,9 +121,12 @@ ta_hook_state() {
     PermissionRequest | Notification) echo blocked ;;
     permission.asked | form.created) echo blocked ;;
     Stop) echo ready ;;
+    # Codex fires no Stop for a turn the user interrupted.
+    Interrupt) echo ready ;;
     # Fired when a turn ends on an API error (rate_limit, overloaded, billing_error...).
     StopFailure) echo error ;;
-    session.execution.succeeded | session.execution.failed | session.execution.interrupted) echo ready ;;
+    session.execution.succeeded | session.execution.interrupted) echo ready ;;
+    session.execution.failed) echo error ;;
     SessionEnd) echo end ;;
     esac
 }
@@ -182,24 +185,36 @@ ta_classify() {
     printf '%s\n' "$state"
 }
 
-ta_agent_name_of() {
-    # $1 process name, $2 argv. Prints the matched agent name, if any.
+_ta_agent_match() {
+    # $1 process name, $2 argv. Sets TA_AGENT_MATCH to the matched agent name
+    # and returns 0, or returns 1. Prints nothing so a scan can call it per
+    # process without a subshell.
     # macOS ps reports comm as the executable path: match its basename.
-    local comm=${1,,} args=${2,,} name
+    # Bash =~ rather than grep: this runs per process per name, and a fork
+    # each made detection the slowest part of a scan.
+    local comm=${1,,} args=${2,,} name re
     comm=${comm##*/}
+    TA_AGENT_MATCH=
     for name in $TA_AGENT_NAMES; do
         case "$comm" in
         "$name" | "$name"-*)
-            printf '%s\n' "$name"
+            TA_AGENT_MATCH=$name
             return 0
             ;;
         esac
-        if grep -qE "(^|[/[:space:]])$name([/:.[:space:]]|$)" <<<"$args"; then
-            printf '%s\n' "$name"
+        re="(^|[/[:space:]])$name([/:.[:space:]]|\$)"
+        if [[ $args =~ $re ]]; then
+            TA_AGENT_MATCH=$name
             return 0
         fi
     done
     return 1
+}
+
+ta_agent_name_of() {
+    # $1 process name, $2 argv. Prints the matched agent name, if any.
+    _ta_agent_match "$@" || return 1
+    printf '%s\n' "$TA_AGENT_MATCH"
 }
 
 ta_ps_snapshot() {
@@ -222,7 +237,7 @@ ta_detect_agent() {
     local root=${1:-}
     [[ -n "$root" ]] || return 1
     [[ -n "${TA_PS_LOADED:-}" ]] || ta_ps_snapshot
-    local pid next name
+    local pid next
     local queue=("$root") visited=' '
     while ((${#queue[@]} > 0)); do
         pid=${queue[0]}
@@ -231,8 +246,8 @@ ta_detect_agent() {
         *" $pid "*) continue ;;
         esac
         visited="$visited$pid "
-        if name=$(ta_agent_name_of "${TA_PS_COMMS[$pid]:-}" "${TA_PS_ARGS[$pid]:-}"); then
-            printf '%s %s\n' "$name" "$pid"
+        if _ta_agent_match "${TA_PS_COMMS[$pid]:-}" "${TA_PS_ARGS[$pid]:-}"; then
+            printf '%s %s\n' "$TA_AGENT_MATCH" "$pid"
             return 0
         fi
         for next in ${TA_PS_CHILDREN[$pid]:-}; do
@@ -312,6 +327,29 @@ ta_sanitize() {
         s="${s:0:max-1}…"
     fi
     printf '%s\n' "$s"
+}
+
+ta_server_key() {
+    # Short filesystem-safe name of the tmux server we belong to, so state
+    # for `tmux -L a` and `-L b` does not mix. $TMUX is set inside panes,
+    # which keeps hooks fork-free; outside tmux ask the server, else default.
+    local key sock=${TMUX:-}
+    sock=${sock%%,*}
+    [[ -n "$sock" ]] || sock=$(tmux display-message -p '#{socket_path}' 2>/dev/null) || sock=
+    key=${sock##*/}
+    key=${key//[^A-Za-z0-9._-]/_}
+    printf '%s\n' "${key:-default}"
+}
+
+ta_detail_epoch() {
+    # $1 state dir, $2 pane id. Prints the epoch field of the detail file;
+    # fails silently when missing, empty or not a number.
+    local line
+    [[ -s "$1/detail-$2" ]] || return 1
+    IFS= read -r line <"$1/detail-$2" || [[ -n "$line" ]] || return 1
+    line=${line%%|*}
+    [[ "$line" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$line"
 }
 
 ta_detail_read() {
