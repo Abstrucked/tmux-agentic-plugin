@@ -24,12 +24,12 @@ notify_wait() {
 
 notify_desktop_ok() {
     # Whether a desktop notification can reach the user: notify-send needs a
-    # display (tmux's global environment knows it when this process, started
+    # session bus or display (tmux's global environment knows it when this process, started
     # by a key binding or hook, lost it); osascript needs nothing.
     local v
     if command -v notify-send >/dev/null 2>&1; then
-        [[ -z ${DISPLAY:-}${WAYLAND_DISPLAY:-} ]] || return 0
-        for v in DISPLAY WAYLAND_DISPLAY; do
+        [[ -z ${DBUS_SESSION_BUS_ADDRESS:-}${DISPLAY:-}${WAYLAND_DISPLAY:-} ]] || return 0
+        for v in DBUS_SESSION_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY; do
             [[ $(tmux show-environment -g "$v" 2>/dev/null) == "$v="?* ]] && return 0
         done
     fi
@@ -61,31 +61,25 @@ notify_terminal() {
     done < <(tmux list-clients -F '#{client_tty}|#{client_termname}' 2>/dev/null)
 }
 
-notify() {
-    # $1 agent, $2 state, $3 tmux target, $4 working directory, $5 pane id.
-    [[ $(tmux show-option -gqv @tmux-agent-notify 2>/dev/null) != off ]] || return 0
-    local method cmd what urgency title body detail ttitle tbody
-    method=$(ta_opt TMUX_AGENT_NOTIFY_METHOD @tmux-agent-notify-method auto)
-    [[ $method != off ]] || return 0
-    case $2 in
+notify_deliver() {
+    # $1 method, $2 agent, $3 state, $4 tmux target, $5 working directory,
+    # $6 pane id, $7 detail ("" when none). Builds the text and dispatches.
+    local method=$1 cmd what urgency title body
+    case $3 in
         blocked) what='needs input' urgency=critical ;;
         error) what='hit an error' urgency=critical ;;
         *) what=finished urgency=normal ;;
     esac
-    title="$1 $what" body="${4##*/} · $3"
-    if detail=$(ta_detail_read "$TA_STATE_DIR" "$5" 2>/dev/null); then
-        body="$detail"$'\n'"$body"
-    fi
+    title="$2 $what" body="${5##*/} · $4"
+    [[ -z $7 ]] || body="$7"$'\n'"$body"
+    local ttitle tbody
     ttitle=$(ta_sanitize "$title") tbody=$(ta_sanitize "$body" 500)
 
-    if [[ $method == auto ]]; then
-        if notify_desktop_ok; then method=desktop; else method=terminal; fi
-    fi
     if [[ $method == terminal ]]; then
         (
             [[ -z ${TA_LOCK_FD:-} ]] || exec {TA_LOCK_FD}>&-
             trap '' HUP
-            notify_terminal "$5" "$ttitle" "$tbody"
+            notify_terminal "$6" "$ttitle" "$tbody"
         ) </dev/null >/dev/null 2>&1 &
     elif command -v notify-send >/dev/null 2>&1; then
         # notify-send renders markup in the body.
@@ -99,7 +93,7 @@ notify() {
         (
             [[ -z ${TA_LOCK_FD:-} ]] || exec {TA_LOCK_FD}>&-
             trap '' HUP
-            notify_wait "$urgency" "$5" "$etitle" "$ebody"
+            notify_wait "$urgency" "$6" "$etitle" "$ebody"
         ) </dev/null >/dev/null 2>&1 &
     elif command -v osascript >/dev/null 2>&1; then
         # Text goes in as arguments, so quotes in paths need no escaping.
@@ -114,9 +108,39 @@ notify() {
         (
             [[ -z ${TA_LOCK_FD:-} ]] || exec {TA_LOCK_FD}>&-
             trap '' HUP
-            export TA_TITLE=$ttitle TA_BODY=$tbody TA_STATE=$2 TA_AGENT=$1 \
-                TA_PANE=$5 TA_PATH=$4 TA_URGENCY=$urgency
+            export TA_TITLE=$ttitle TA_BODY=$tbody TA_STATE=$3 TA_AGENT=$2 \
+                TA_PANE=$6 TA_PATH=$5 TA_URGENCY=$urgency
             exec bash -c "$cmd"
         ) </dev/null >/dev/null 2>&1 &
     fi
+}
+
+notify() {
+    # $1 agent, $2 state, $3 tmux target, $4 working directory, $5 pane id
+    # ("<host key>/<pane>" for a remote agent).
+    [[ $(tmux show-option -gqv @tmux-agent-notify 2>/dev/null) != off ]] || return 0
+    local method detail=''
+    method=$(ta_opt TMUX_AGENT_NOTIFY_METHOD @tmux-agent-notify-method auto)
+    [[ $method != off ]] || return 0
+    if [[ $method == auto ]]; then
+        if notify_desktop_ok; then method=desktop; else method=terminal; fi
+    fi
+    if [[ $5 == */* ]]; then
+        # A remote agent's detail lives on its host. Fetch it off the scan,
+        # which must not wait on ssh.
+        (
+            [[ -z ${TA_LOCK_FD:-} ]] || exec {TA_LOCK_FD}>&-
+            trap '' HUP
+            if command -v timeout >/dev/null 2>&1; then
+                detail=$(timeout 10 "$SELF" detail --pane "$5" 2>/dev/null) || detail=''
+            else
+                detail=$("$SELF" detail --pane "$5" 2>/dev/null) || detail=''
+            fi
+            notify_deliver "$method" "$1" "$2" "$3" "$4" "$5" "$detail"
+            wait
+        ) </dev/null >/dev/null 2>&1 &
+        return 0
+    fi
+    detail=$(ta_detail_read "$TA_STATE_DIR" "$5" 2>/dev/null) || detail=''
+    notify_deliver "$method" "$1" "$2" "$3" "$4" "$5" "$detail"
 }

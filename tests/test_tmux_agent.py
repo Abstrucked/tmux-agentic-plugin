@@ -708,7 +708,7 @@ class HookTests(unittest.TestCase):
             ("form.created", "blocked"),
             ("form.replied", "working"),
             ("session.execution.succeeded", "ready"),
-            ("session.execution.failed", "ready"),
+            ("session.execution.failed", "error"),
             ("session.execution.interrupted", "ready"),
             ("session.text.delta", ""),
         ):
@@ -896,8 +896,8 @@ dispose();
             want = [
                 "hook opencode session.execution.started",
                 "hook opencode permission.asked",
-                "hook opencode permission.replied",
-                "hook opencode form.created",
+                "hook opencode session.execution.started",
+                "hook opencode permission.asked",
                 "hook opencode session.execution.succeeded",
             ]
             calls = []

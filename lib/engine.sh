@@ -121,9 +121,12 @@ ta_hook_state() {
     PermissionRequest | Notification) echo blocked ;;
     permission.asked | form.created) echo blocked ;;
     Stop) echo ready ;;
+    # Codex fires no Stop for a turn the user interrupted.
+    Interrupt) echo ready ;;
     # Fired when a turn ends on an API error (rate_limit, overloaded, billing_error...).
     StopFailure) echo error ;;
-    session.execution.succeeded | session.execution.failed | session.execution.interrupted) echo ready ;;
+    session.execution.succeeded | session.execution.interrupted) echo ready ;;
+    session.execution.failed) echo error ;;
     SessionEnd) echo end ;;
     esac
 }
@@ -312,6 +315,29 @@ ta_sanitize() {
         s="${s:0:max-1}…"
     fi
     printf '%s\n' "$s"
+}
+
+ta_server_key() {
+    # Short filesystem-safe name of the tmux server we belong to, so state
+    # for `tmux -L a` and `-L b` does not mix. $TMUX is set inside panes,
+    # which keeps hooks fork-free; outside tmux ask the server, else default.
+    local key sock=${TMUX:-}
+    sock=${sock%%,*}
+    [[ -n "$sock" ]] || sock=$(tmux display-message -p '#{socket_path}' 2>/dev/null) || sock=
+    key=${sock##*/}
+    key=${key//[^A-Za-z0-9._-]/_}
+    printf '%s\n' "${key:-default}"
+}
+
+ta_detail_epoch() {
+    # $1 state dir, $2 pane id. Prints the epoch field of the detail file;
+    # fails silently when missing, empty or not a number.
+    local line
+    [[ -s "$1/detail-$2" ]] || return 1
+    IFS= read -r line <"$1/detail-$2" || [[ -n "$line" ]] || return 1
+    line=${line%%|*}
+    [[ "$line" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$line"
 }
 
 ta_detail_read() {
