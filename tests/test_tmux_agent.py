@@ -28,6 +28,10 @@ os.environ.setdefault("TMUX_AGENT_REMOTES", "")
 os.environ.setdefault("TMUX_AGENT_REMOTE_DISCOVER", "off")
 os.environ.setdefault("TMUX_AGENT_REMOTE_TAILSCALE", "off")
 os.environ.setdefault("TMUX_AGENT_REMOTE_WATCH", "off")
+# Notification method "auto" depends on a display; CI has none and a
+# developer's shell has one. Tests that want the desktop path ask for it.
+os.environ.pop("DISPLAY", None)
+os.environ.pop("WAYLAND_DISPLAY", None)
 
 
 def bash(script, *args, env=None):
@@ -516,7 +520,8 @@ class NotifyClickTests(unittest.TestCase):
         (self.dir / "report-%7").write_text(f"blocked|{now}\n")
         e = {k: v for k, v in os.environ.items() if k != "TMUX_AGENT_QUIET"}
         e.update({"TMUX_AGENT_STATE_DIR": str(self.dir),
-                  "PATH": f"{self.fake}:{os.environ['PATH']}", **env})
+                  "PATH": f"{self.fake}:{os.environ['PATH']}",
+                  "TMUX_AGENT_NOTIFY_METHOD": "desktop", **env})
         return subprocess.run([str(CLI), "refresh", "1"], capture_output=True,
                               text=True, env=e, timeout=10)
 
@@ -1372,6 +1377,7 @@ class RemoteTests(unittest.TestCase):
         }
         self.answer("devbox", "blocked|claude|%3|main:1.2|@2|0|/src/api\n")
         env = {k: v for k, v in self.env.items() if k != "TMUX_AGENT_QUIET"}
+        env["TMUX_AGENT_NOTIFY_METHOD"] = "desktop"
         self.tmux_log = fake_tmux(self.fake, self.tmux_replies)
         subprocess.run([str(CLI), "remote-refresh"], env=env, timeout=20)
         self.assertTrue(wait_for(lambda: "switch-client -c /dev/pts/4 -t @7"

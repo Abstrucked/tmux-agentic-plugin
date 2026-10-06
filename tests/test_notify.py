@@ -6,6 +6,7 @@ tmux replaced by stand-ins on PATH.
 
 import os
 import shlex
+import shutil
 import tempfile
 import time
 import unittest
@@ -29,6 +30,14 @@ class NotifyTests(unittest.TestCase):
         self.state.mkdir()
         self.tty = self.dir / "tty"
         self.tty.write_text("")
+        # PATH holds only the stand-ins and symlinks to the tools the snippet
+        # needs, so a host's real notify-send or osascript never leaks in.
+        for tool in ("bash", "tr", "cat", "sed", "grep", "date", "env", "sleep",
+                     "mkdir", "rm", "head", "cut", "awk", "touch", "dirname",
+                     "basename", "stat", "ps", "id", "uname", "wc", "sort", "printf"):
+            found = shutil.which(tool)
+            if found:
+                (self.bin / tool).symlink_to(found)
 
     def tmux(self, replies=None):
         return fake_tmux(self.bin, replies)
@@ -46,7 +55,7 @@ class NotifyTests(unittest.TestCase):
                    path="/home/u/proj"):
         # PATH is just the stand-ins plus the system tools bash needs, so a
         # real notify-send or osascript never leaks in.
-        e = {"PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.dir),
+        e = {"PATH": str(self.bin), "HOME": str(self.dir),
              "DISPLAY": ":0", **(env or {})}
         unset = " ".join(k for k in ("DISPLAY", "WAYLAND_DISPLAY") if e.get(k) is None)
         for k in ("DISPLAY", "WAYLAND_DISPLAY"):
@@ -142,6 +151,16 @@ class NotifyTests(unittest.TestCase):
         self.run_notify(env={"DISPLAY": None})
         self.assertIn(f"{ESC}]9;", self.wait_for(self.tty).decode())
         self.assertFalse(log.exists())
+
+    def test_auto_picks_osascript_without_display(self):
+        self.tmux()
+        log = self.dir / "osa.log"
+        osa = self.bin / "osascript"
+        osa.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" >>{shlex.quote(str(log))}\n')
+        osa.chmod(0o755)
+        self.run_notify(env={"DISPLAY": None})
+        self.assertIn("claude needs input", self.wait_for(log).decode())
+        self.assertEqual(self.tty.read_text(), "")
 
     def test_auto_picks_desktop_with_display(self):
         self.tmux()
