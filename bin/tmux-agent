@@ -30,10 +30,16 @@
 #   focus --pane <id>    switch a client to the pane and raise its terminal
 #                        window (what clicking a notification does)
 #   refresh              update cached state now
-#   send --pane <id> (--key K | --text T)...
+#   send --pane <id> [--expect-state S] (--key K | --text T)...
 #                        type into an agent pane, in order: --key takes
 #                        Enter Escape Tab Space BSpace Up Down Left Right
-#                        C-c or one of y n Y N 0-9; --text is literal
+#                        C-c or one of y n Y N 0-9; --text is literal.
+#                        With --expect-state, exit 3 without typing unless
+#                        the pane is in that state
+#   detail --pane <id>   the one-line context a hook reported (what is
+#                        being asked, what the agent said, the error)
+#   diff --pane <id>     git diff of the pane's directory (stat, diff and
+#                        untracked files)
 #   mobile               tap-friendly agent list and action menu for a
 #                        phone terminal (Termius over ssh)
 #   remotes              list remote hosts and how their last fetch went
@@ -145,8 +151,10 @@ scan() {
     printf '%s\n' "$now_s" >"$stamp"
 
     local pane pid wid target path detect agent apid cpu tail tail_hash
-    local state prev prev_cpu prev_tail_hash changed seen output_changed rstate repoch f base
+    local state prev prev_cpu prev_tail_hash changed seen output_changed rstate repoch f base authoritative
     local -A live=()
+    # One ps per scan: detection of every pane reads the same snapshot.
+    ta_ps_snapshot
     while IFS='|' read -r pane pid wid target path; do
         [[ -n $pane ]] || continue
         live[$pane]=1
@@ -160,15 +168,39 @@ scan() {
             read -r agent apid <<<"$detect"
             cpu=$(ta_proc_cpu "$apid" || echo 0)
         fi
-        tail=$(tmux capture-pane -p -J -S -30 -t "$pane" 2>/dev/null | tail_lines 12 || true)
-        read -r tail_hash _ <<<"$(cksum <<<"$tail")"
-
         prev='' prev_cpu=0 prev_tail_hash='' changed=$now_s
         if [[ -f $TA_STATE_DIR/state-$pane ]]; then
             IFS='|' read -r prev _ag prev_cpu changed _up _tgt _wid _path prev_tail_hash \
                 <"$TA_STATE_DIR/state-$pane" || true
             [[ $prev_cpu =~ ^[0-9]+$ ]] || prev_cpu=0
             [[ $changed =~ ^[0-9]+$ ]] || changed=$now_s
+        fi
+        # A hook-reported state wins over the heuristics. Agent hooks report
+        # every transition, so their settled states hold while the agent
+        # lives. "working" and reports without a detected agent expire:
+        # an interrupted turn fires no Stop hook.
+        rstate='' repoch=0 authoritative=0
+        if [[ -f $TA_STATE_DIR/report-$pane ]]; then
+            IFS='|' read -r rstate repoch <"$TA_STATE_DIR/report-$pane" || true
+            [[ $repoch =~ ^[0-9]+$ ]] || repoch=0
+            if [[ -n $rstate ]] && { ((now_s - repoch < TA_REPORT_TTL)) ||
+                { [[ -n $detect && $rstate != working ]]; }; }; then
+                authoritative=1
+            fi
+        fi
+        # A settled report decides the state alone: skip the capture and
+        # keep the last tail hash. "working" still reads the screen, for
+        # the interrupted check.
+        if ((authoritative)) && [[ $rstate != working && -n $prev_tail_hash ]]; then
+            tail='' tail_hash=$prev_tail_hash
+        else
+            tail=$(tmux capture-pane -p -J -S -30 -t "$pane" 2>/dev/null | tail_lines 12 || true)
+            read -r tail_hash _ <<<"$(cksum <<<"$tail")"
+        fi
+        # An interrupted turn fires no Stop hook: let the heuristics decide.
+        if ((authoritative)) && [[ $rstate == working ]] && ta_match_interrupted "$tail"; then
+            rm -f "$TA_STATE_DIR/report-$pane"
+            authoritative=0
         fi
         output_changed=0
         if [[ -n $prev_tail_hash && $tail_hash != "$prev_tail_hash" ]]; then
@@ -180,25 +212,15 @@ scan() {
         fi
 
         state=$(ta_classify "$tail" "$((cpu - prev_cpu))" "$prev" "$seen" "$output_changed")
-        # A hook-reported state wins over the heuristics. Agent hooks report
-        # every transition, so their settled states hold while the agent
-        # lives. "working" and reports without a detected agent expire:
-        # an interrupted turn fires no Stop hook.
-        rstate='' repoch=0
-        if [[ -f $TA_STATE_DIR/report-$pane ]]; then
-            IFS='|' read -r rstate repoch <"$TA_STATE_DIR/report-$pane" || true
-            [[ $repoch =~ ^[0-9]+$ ]] || repoch=0
-            if [[ -n $rstate ]] && { ((now_s - repoch < TA_REPORT_TTL)) ||
-                { [[ -n $detect && $rstate != working ]]; }; }; then
-                state=$rstate
-                # Seen after the agent reported it finished: acknowledged.
-                if [[ $state == ready && -f $TA_STATE_DIR/seen-$pane ]] &&
-                    (($(cat "$TA_STATE_DIR/seen-$pane") >= repoch)); then
-                    state=idle
-                fi
-            else
-                rm -f "$TA_STATE_DIR/report-$pane"
+        if ((authoritative)); then
+            state=$rstate
+            # Seen after the agent reported it finished: acknowledged.
+            if [[ $state == ready || $state == error ]] && [[ -f $TA_STATE_DIR/seen-$pane ]] &&
+                (($(cat "$TA_STATE_DIR/seen-$pane") >= repoch)); then
+                state=idle
             fi
+        elif [[ -f $TA_STATE_DIR/report-$pane ]]; then
+            rm -f "$TA_STATE_DIR/report-$pane"
         fi
 
         [[ $state == "$prev" ]] || changed=$now_s
@@ -208,13 +230,13 @@ scan() {
 
         # Notify on real transitions of panes nobody is looking at.
         if [[ -z ${TMUX_AGENT_QUIET:-} && -n $prev && $state != "$prev" ]] &&
-            { [[ $state == blocked ]] || [[ $state == ready ]]; } &&
+            { [[ $state == blocked || $state == ready || $state == error ]]; } &&
             ! pane_in_view "$pane"; then
             notify "$agent" "$state" "$target" "$path" "$pane"
         fi
     done < <(tmux list-panes -a -F "$TA_PANE_FMT" 2>/dev/null || true)
 
-    for f in "$TA_STATE_DIR"/state-* "$TA_STATE_DIR"/seen-* "$TA_STATE_DIR"/report-*; do
+    for f in "$TA_STATE_DIR"/state-* "$TA_STATE_DIR"/seen-* "$TA_STATE_DIR"/report-* "$TA_STATE_DIR"/detail-*; do
         [[ -e $f ]] || continue
         base=${f##*-}
         [[ -n ${live[$base]:-} ]] || rm -f "$f"
@@ -230,7 +252,7 @@ each_agent() {
     [[ ${1:-} == --local ]] && local_only=1
     now_s=$(now)
     ((local_only)) || remote=$(ta_remote_agents)
-    for s in blocked working ready idle; do
+    for s in $TA_STATES; do
         for f in "$TA_STATE_DIR"/state-*; do
             [[ -e $f ]] || continue
             IFS='|' read -r st ag _ ch _ tgt _ path _ <"$f" || continue
@@ -289,7 +311,7 @@ strip() {
             out="$out${out:+  }$(strip_item "${sts[i]}" "${ags[i]}")"
         done
     else
-        for s in blocked working ready idle; do
+        for s in $TA_STATES; do
             ((${n[$s]:-0})) || continue
             if [[ $s == blocked ]] && ((n[$s] <= 2)); then
                 for i in "${!sts[@]}"; do
@@ -335,7 +357,7 @@ porcelain() {
     # path. What other hosts fetch over ssh, so no jq or colour, and never
     # remote agents (two hosts listing each other must not loop).
     local f st ag ch up tgt wid path s
-    for s in blocked working ready idle; do
+    for s in $TA_STATES; do
         for f in "$TA_STATE_DIR"/state-*; do
             [[ -e $f ]] || continue
             IFS='|' read -r st ag _ ch up tgt wid path _ <"$f" || continue
@@ -361,13 +383,15 @@ cmd_status() {
         shift
     done
     refresh
-    local st ag host tgt age id path
+    local st ag host tgt age id path detail
     while IFS='|' read -r st ag host tgt age id path; do
         if ((json)); then
+            detail=''
+            [[ -n $host ]] || detail=$(ta_detail_read "$TA_STATE_DIR" "$id" || true)
             jq -cn --arg pane "$id" --arg state "$st" --arg agent "$ag" \
-                --arg target "$tgt" --arg path "$path" --arg host "$host" \
+                --arg target "$tgt" --arg path "$path" --arg host "$host" --arg detail "$detail" \
                 --argjson age "$age" \
-                '{pane:$pane,state:$state,agent:$agent,target:$target,path:$path,age:$age}
+                '{pane:$pane,state:$state,agent:$agent,target:$target,path:$path,age:$age,detail:$detail}
                  + if $host == "" then {} else {host:$host} end'
         else
             printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -405,6 +429,48 @@ cmd_read() {
     local -a opts=(-p -J -S "-$((lines * 2))" -t "$pane")
     ((ansi)) && opts+=(-e)
     tmux capture-pane "${opts[@]}" 2>/dev/null | tail_lines "$lines" || true
+}
+
+pane_arg() {
+    # The value of --pane in $@.
+    while (($#)); do
+        if [[ $1 == --pane ]]; then
+            printf '%s' "${2:-}"
+            return 0
+        fi
+        shift
+    done
+}
+
+cmd_detail() {
+    # Remote hosts keep their details to themselves for now.
+    local pane
+    pane=$(pane_arg "$@")
+    [[ -n $pane && $pane != */* ]] || return 0
+    ta_detail_read "$TA_STATE_DIR" "$pane" || true
+}
+
+cmd_diff() {
+    local pane path='' f
+    pane=$(pane_arg "$@")
+    [[ -n $pane ]] || return 1
+    if [[ $pane == */* ]]; then
+        ta_remote_ssh "${pane%%/*}" diff --pane "${pane#*/}" 2>/dev/null || true
+        return 0
+    fi
+    f="$TA_STATE_DIR/state-$pane"
+    [[ -f $f ]] && IFS='|' read -r _ _ _ _ _ _ _ path _ <"$f"
+    # The repo is the agent's working directory, so its .git/config and
+    # .gitattributes are not trusted: no fsmonitor hook, external diff or
+    # textconv driver may run.
+    local -a git=(git --no-pager -c core.fsmonitor=false -c diff.external= -C "$path")
+    if [[ -z $path ]] || ! "${git[@]}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "not a git repository: $path"
+        return 0
+    fi
+    "${git[@]}" diff --no-ext-diff --no-textconv --stat || true
+    "${git[@]}" diff --no-ext-diff --no-textconv --color=always || true
+    "${git[@]}" status --short | grep '^??' || true
 }
 
 cmd_wait() {
@@ -461,20 +527,68 @@ cmd_report() {
     printf '%s|%s\n' "$want" "$(now)" >"$TA_STATE_DIR/report-$pane"
 }
 
+# shellcheck disable=SC2016 # jq programs
+hook_detail() {
+    # $1 event, $2 pane, $3 JSON payload. Writes detail-<pane> as
+    # "epoch|event|text" for the one-line context shown next to the state.
+    local event=$1 pane=$2 text prog file tmp now_s epoch ev
+    file="$TA_STATE_DIR/detail-$pane"
+    case $event in
+    PermissionRequest)
+        prog='(.tool_name // "") as $t | (.tool_input // {}) as $i
+            | ([$i.command, $i.file_path, $i.url, $i.pattern, $i.description, $i.prompt]
+               | map(select(. != null and . != "")) | .[0] | if . == null then "" else tostring end) as $a
+            | if $a == "" then $t else "\($t): \($a)" end'
+        ;;
+    Notification) prog='.message // ""' ;;
+    Stop) prog='(.last_assistant_message // "") | split("\n") | map(select(test("\\S"))) | .[0] // ""' ;;
+    StopFailure) prog='"\(.error_type // ""): \(.error_message // "")" | if . == ": " then "" else . end' ;;
+    UserPromptSubmit) prog='(.prompt // .user_prompt // "") | split("\n") | map(select(test("\\S"))) | .[0] // ""' ;;
+    *) return 0 ;;
+    esac
+    text=$(jq -r "$prog" <<<"$3" 2>/dev/null) || return 0
+    text=$(ta_sanitize "$text")
+    [[ -n $text ]] || return 0
+    now_s=$(now)
+    # Claude fires Notification right after PermissionRequest; the latter
+    # says more, so it keeps the slot for a while.
+    if [[ $event == Notification && -f $file ]]; then
+        IFS='|' read -r epoch ev _ <"$file" || true
+        if [[ $ev == PermissionRequest && $epoch =~ ^[0-9]+$ ]] && ((now_s - epoch < 30)); then
+            return 0
+        fi
+    fi
+    # The temp name stays outside the detail-* glob the scan sweeps.
+    tmp="$TA_STATE_DIR/.detail-$pane.$$"
+    printf '%s|%s|%s\n' "$now_s" "$event" "$text" >"$tmp" && mv "$tmp" "$file"
+}
+
 cmd_hook() {
     # Agent lifecycle hook: tmux-agent hook <agent> <event>. Runs inside the
     # agent, so it never fails, never writes to stdout (Claude Code feeds
     # hook stdout back to the model) and never waits on the pane scan.
-    local event=${2:-} pane=${TMUX_PANE:-} state prev='' report
-    # Claude Code and Codex pipe a JSON payload; drain it unread.
-    [[ -t 0 ]] || cat >/dev/null 2>&1 || true
+    local event=${2:-} pane=${TMUX_PANE:-} state prev='' report payload=''
+    # Claude Code and Codex pipe a JSON payload. Events off the hot path
+    # (not the per-tool ones) are parsed for a one-line detail; the rest
+    # is drained unread.
+    if [[ ! -t 0 ]]; then
+        case $event in
+        PermissionRequest | Notification | Stop | StopFailure | UserPromptSubmit)
+            if command -v jq >/dev/null 2>&1; then
+                payload=$(head -c 1048576 2>/dev/null) || true
+            fi
+            ;;
+        esac
+        cat >/dev/null 2>&1 || true
+    fi
     [[ -n $pane ]] || return 0
     state=$(ta_hook_state "$event")
     [[ -n $state ]] || return 0
     mkdir -p "$TA_STATE_DIR"
+    [[ -z $payload ]] || hook_detail "$event" "$pane" "$payload" 2>/dev/null || true
     report="$TA_STATE_DIR/report-$pane"
     if [[ $state == end ]]; then
-        rm -f "$report"
+        rm -f "$report" "$TA_STATE_DIR/detail-$pane"
     else
         [[ -f $report ]] && IFS='|' read -r prev _ <"$report"
         printf '%s|%s\n' "$state" "$(now)" >"$report"
@@ -674,12 +788,16 @@ ta_send_key_ok() {
 cmd_send() {
     # --pane <id|key/pane>, then --key and --text in the order to type them.
     # Only agent panes take input. A remote one is forwarded to its host.
-    local pane='' i
+    local pane='' expect='' i st=''
     local -a acts=()
     while (($#)); do
         case $1 in
         --pane)
             pane=${2:-}
+            shift 2 || break
+            ;;
+        --expect-state)
+            expect=${2:-}
             shift 2 || break
             ;;
         --key)
@@ -706,7 +824,8 @@ cmd_send() {
         return 2
     fi
     if [[ $pane == */* ]]; then
-        ta_remote_ssh "${pane%%/*}" send --pane "${pane#*/}" "${acts[@]}"
+        ta_remote_ssh "${pane%%/*}" send --pane "${pane#*/}" \
+            ${expect:+--expect-state "$expect"} "${acts[@]}"
         return
     fi
     refresh
@@ -714,6 +833,13 @@ cmd_send() {
         echo "send: not an agent pane: $pane" >&2
         return 1
     }
+    if [[ -n $expect ]]; then
+        IFS='|' read -r st _ <"$TA_STATE_DIR/state-$pane" || true
+        if [[ $st != "$expect" ]]; then
+            echo "send: pane changed: now $st" >&2
+            return 3
+        fi
+    fi
     for ((i = 0; i < ${#acts[@]}; i += 2)); do
         if [[ ${acts[i]} == --key ]]; then
             tmux send-keys -t "$pane" "${acts[i + 1]}"
@@ -923,6 +1049,10 @@ main() {
     focus) cmd_focus "$@" ;;
     remotes) cmd_remotes ;;
     send) cmd_send "$@" ;;
+    pick-rows) pick_reload ;;
+    pick-action) pick_action "$@" ;;
+    detail) cmd_detail "$@" ;;
+    diff) cmd_diff "$@" ;;
     mobile) cmd_mobile ;;
     mobile-rows) mobile_rows ;;
     remote-refresh) cmd_remote_refresh ;;

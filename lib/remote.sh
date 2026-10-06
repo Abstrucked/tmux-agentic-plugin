@@ -269,7 +269,7 @@ ta_remote_in_view() {
 
 ta_remote_notify() {
     # $1 key, $2 host name, $3 previous answer, $4 new answer. Notify about
-    # agents that just became blocked or ready, as the local scan does.
+    # agents that just became blocked, ready or errored, as the local scan does.
     [[ -z ${TMUX_AGENT_QUIET:-} ]] || return 0
     local st ag pane tgt path prev
     local -A before=()
@@ -279,7 +279,7 @@ ta_remote_notify() {
     while IFS='|' read -r st ag pane tgt _ _ path; do
         prev=${before[$pane]:-}
         [[ -n $prev && $st != "$prev" ]] || continue
-        [[ $st == blocked || $st == ready ]] || continue
+        [[ $st == blocked || $st == ready || $st == error ]] || continue
         ta_remote_in_view "$1" && continue
         notify "$ag@$2" "$st" "$tgt" "$path" "$1/$pane"
     done <"$4"

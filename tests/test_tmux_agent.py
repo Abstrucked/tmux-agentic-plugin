@@ -141,9 +141,10 @@ class RollupTests(unittest.TestCase):
         self.assertEqual(r.stdout.strip(), "")
 
     def test_ranks_are_ordered(self):
-        r = bash('echo "$(ta_state_rank blocked) $(ta_state_rank working) '
-                 '$(ta_state_rank ready) $(ta_state_rank idle) $(ta_state_rank other)"')
-        self.assertEqual(r.stdout.strip(), "0 1 2 3 4")
+        r = bash('echo "$(ta_state_rank blocked) $(ta_state_rank error) '
+                 '$(ta_state_rank working) $(ta_state_rank ready) '
+                 '$(ta_state_rank idle) $(ta_state_rank other)"')
+        self.assertEqual(r.stdout.strip(), "0 1 2 3 4 5")
 
     def test_state_colors(self):
         r = bash('echo "$(ta_state_color blocked) $(ta_state_color working) '
@@ -382,8 +383,8 @@ class CliSmokeTests(unittest.TestCase):
                 self.assertNotIn("\x1b[", line.partition("\x1b[0m")[2])
             rows = [re.sub(r"\x1b\[[0-9;]*m", "", line).split("\t")
                     for line in raw]
-            self.assertEqual([pane for _, pane in rows], ["%1", "%2", "%3"])
-            shown = [text for text, _ in rows]
+            self.assertEqual([pane for _, pane, *_ in rows], ["%1", "%2", "%3"])
+            shown = [text for text, *_ in rows]
             for column in ("work:", "0m"):
                 self.assertEqual(len({line.index(column) for line in shown}), 1, shown)
             self.assertNotIn("12345", "".join(shown))
@@ -1347,7 +1348,7 @@ class RemoteTests(unittest.TestCase):
         self.cli("pick")
         rows = [re.sub(r"\x1b\[[0-9;]*m", "", line).split("\t")
                 for line in (self.dir / "rows").read_text().splitlines()]
-        self.assertEqual([pane for _, pane in rows], [f"{self.KEY}/%3", "%1"])
+        self.assertEqual([pane for _, pane, *_ in rows], [f"{self.KEY}/%3", "%1"])
         self.assertIn("claude@devbox", rows[0][0])
         self.answer("devbox", "remote pane text\n")
         r = self.cli("read", "--pane", f"{self.KEY}/%3", "--lines", "5", "--ansi")
