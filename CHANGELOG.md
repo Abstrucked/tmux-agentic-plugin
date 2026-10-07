@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-10-07)
 
 - Desktop notifications for blocked and error agents use `normal` urgency, so
   they take your notification daemon's theme and timeout instead of the
