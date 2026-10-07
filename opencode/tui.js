@@ -85,6 +85,29 @@ function sessionOf(event) {
   return data.sessionID ?? data.form?.sessionID;
 }
 
+// A pane can show several root sessions (tabs), but it has one state. Each
+// session keeps its own state and pending prompts; the pane reports the most
+// urgent one, so B finishing never hides that A is still working or blocked.
+const URGENCY = ["ready", "working", "error", "blocked"];
+// Pane state -> the event tmux-agent already maps to it.
+const REPORT = {
+  blocked: "permission.asked",
+  error: "session.execution.failed",
+  working: "session.execution.started",
+  ready: "session.execution.succeeded",
+};
+const STATE_OF = {
+  "session.execution.started": "working",
+  "session.execution.succeeded": "ready",
+  "session.execution.interrupted": "ready",
+  "session.execution.failed": "error",
+};
+
+// Prompts without an id share one slot: an unkeyed reply answers an unkeyed ask.
+function requestOf(data) {
+  return data?.requestID ?? data?.id ?? data?.permission?.id ?? data?.form?.id ?? "-";
+}
+
 export default {
   id: "tmux-agent",
   setup(api) {
@@ -111,19 +134,62 @@ export default {
       return shown;
     };
 
+    const sessions = new Map(); // root session -> { state, pending: Set<request> }
+    let paneState;
+    const entry = (id) => {
+      if (!sessions.has(id)) {
+        sessions.set(id, { state: "ready", pending: new Set() });
+      }
+      return sessions.get(id);
+    };
+    const publish = () => {
+      let state = "ready";
+      for (const s of sessions.values()) {
+        const own = s.pending.size > 0 ? "blocked" : s.state;
+        if (URGENCY.indexOf(own) > URGENCY.indexOf(state)) {
+          state = own;
+        }
+      }
+      if (state !== paneState) {
+        paneState = state;
+        report(REPORT[state]);
+      }
+    };
+
     const handle = (event) => {
       const type = event?.type;
+      // A deleted session can no longer run or ask; stop counting it.
+      if (type === "session.deleted") {
+        const gone = event.data?.sessionID ?? event.data?.info?.id;
+        if (gone !== undefined && sessions.delete(gone)) {
+          publish();
+        }
+        return;
+      }
       const id = sessionOf(event);
       if (id === undefined || !(EXECUTION.has(type) || PROMPTS.has(type)) || !mine(id)) {
         return;
       }
-      if (EXECUTION.has(type) && root(id) !== id) {
+      const top = root(id);
+      if (EXECUTION.has(type) && top !== id) {
         return;
       }
       if (type === "session.execution.interrupted" && event.data?.reason === "shutdown") {
         return;
       }
-      report(type);
+      const s = entry(top);
+      if (EXECUTION.has(type)) {
+        s.state = STATE_OF[type];
+        // A finished run cannot still be waiting on the user.
+        if (s.state !== "working") {
+          s.pending.clear();
+        }
+      } else if (type === "permission.asked" || type === "form.created") {
+        s.pending.add(requestOf(event.data));
+      } else {
+        s.pending.delete(requestOf(event.data));
+      }
+      publish();
     };
 
     const abort = new AbortController();

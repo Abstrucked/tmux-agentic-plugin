@@ -4,6 +4,7 @@ Classification fixtures, detection checks and CLI smoke tests for
 lib/engine.sh, bin/tmux-agent, lib/install-hooks and the TPM entry point.
 """
 
+import contextlib
 import getpass
 import json
 import os
@@ -28,6 +29,10 @@ os.environ.setdefault("TMUX_AGENT_REMOTES", "")
 os.environ.setdefault("TMUX_AGENT_REMOTE_DISCOVER", "off")
 os.environ.setdefault("TMUX_AGENT_REMOTE_TAILSCALE", "off")
 os.environ.setdefault("TMUX_AGENT_REMOTE_WATCH", "off")
+# Notification method "auto" depends on a display; CI has none and a
+# developer's shell has one. Tests that want the desktop path ask for it.
+os.environ.pop("DISPLAY", None)
+os.environ.pop("WAYLAND_DISPLAY", None)
 
 
 def bash(script, *args, env=None):
@@ -141,9 +146,10 @@ class RollupTests(unittest.TestCase):
         self.assertEqual(r.stdout.strip(), "")
 
     def test_ranks_are_ordered(self):
-        r = bash('echo "$(ta_state_rank blocked) $(ta_state_rank working) '
-                 '$(ta_state_rank ready) $(ta_state_rank idle) $(ta_state_rank other)"')
-        self.assertEqual(r.stdout.strip(), "0 1 2 3 4")
+        r = bash('echo "$(ta_state_rank blocked) $(ta_state_rank error) '
+                 '$(ta_state_rank working) $(ta_state_rank ready) '
+                 '$(ta_state_rank idle) $(ta_state_rank other)"')
+        self.assertEqual(r.stdout.strip(), "0 1 2 3 4 5")
 
     def test_state_colors(self):
         r = bash('echo "$(ta_state_color blocked) $(ta_state_color working) '
@@ -382,8 +388,8 @@ class CliSmokeTests(unittest.TestCase):
                 self.assertNotIn("\x1b[", line.partition("\x1b[0m")[2])
             rows = [re.sub(r"\x1b\[[0-9;]*m", "", line).split("\t")
                     for line in raw]
-            self.assertEqual([pane for _, pane in rows], ["%1", "%2", "%3"])
-            shown = [text for text, _ in rows]
+            self.assertEqual([pane for _, pane, *_ in rows], ["%1", "%2", "%3"])
+            shown = [text for text, *_ in rows]
             for column in ("work:", "0m"):
                 self.assertEqual(len({line.index(column) for line in shown}), 1, shown)
             self.assertNotIn("12345", "".join(shown))
@@ -515,7 +521,8 @@ class NotifyClickTests(unittest.TestCase):
         (self.dir / "report-%7").write_text(f"blocked|{now}\n")
         e = {k: v for k, v in os.environ.items() if k != "TMUX_AGENT_QUIET"}
         e.update({"TMUX_AGENT_STATE_DIR": str(self.dir),
-                  "PATH": f"{self.fake}:{os.environ['PATH']}", **env})
+                  "PATH": f"{self.fake}:{os.environ['PATH']}",
+                  "TMUX_AGENT_NOTIFY_METHOD": "desktop", **env})
         return subprocess.run([str(CLI), "refresh", "1"], capture_output=True,
                               text=True, env=e, timeout=10)
 
@@ -531,7 +538,7 @@ class NotifyClickTests(unittest.TestCase):
         self.assertEqual(self.raised.read_text(), "4343")
         self.assertTrue((self.dir / "seen-%7").exists())
         sent = self.notified.read_text()
-        self.assertIn("-u critical -A default=Show --wait custom needs input", sent)
+        self.assertIn("-u normal -p -A default=Show --wait custom needs input", sent)
 
     def test_dismissed_notification_does_nothing(self):
         self.refresh(ACTION="")
@@ -552,7 +559,7 @@ class NotifyClickTests(unittest.TestCase):
         self.refresh(NO_WAIT="1")
         self.assertTrue(wait_for(lambda: self.notified.exists()))
         self.assertEqual(self.notified.read_text().splitlines(),
-                         ["-a tmux-agent -u critical custom needs input app · main:1.1"])
+                         ["-a tmux-agent -u normal custom needs input app · main:1.1"])
 
     def test_focus_on_a_closed_pane_does_nothing(self):
         r = subprocess.run(
@@ -702,7 +709,7 @@ class HookTests(unittest.TestCase):
             ("form.created", "blocked"),
             ("form.replied", "working"),
             ("session.execution.succeeded", "ready"),
-            ("session.execution.failed", "ready"),
+            ("session.execution.failed", "error"),
             ("session.execution.interrupted", "ready"),
             ("session.text.delta", ""),
         ):
@@ -719,15 +726,37 @@ class HookTests(unittest.TestCase):
                  "TMUX_AGENT_STATE_DIR": state_dir, "TMUX_PANE": pane},
         )
 
-    def test_hook_reports_state_silently(self):
+    @contextlib.contextmanager
+    def hook_dir(self):
         with tempfile.TemporaryDirectory(prefix="ta-hook-") as directory:
+            try:
+                yield directory
+            finally:
+                self.settle(directory)
+
+    @staticmethod
+    def settle(state_dir, wait_stamp=True):
+        """The hook leaves a background rescan writing into state_dir; wait
+        for it (it takes the scan lock) so the directory can be removed."""
+        d = Path(state_dir)
+        deadline = time.time() + 5
+        while wait_stamp and not (d / "stamp").exists() and time.time() < deadline:
+            time.sleep(0.02)
+        if shutil.which("flock"):
+            subprocess.run(["flock", str(d / "lock"), "true"], timeout=10)
+        else:
+            while (d / "lock.d").exists() and time.time() < deadline + 10:
+                time.sleep(0.02)
+
+    def test_hook_reports_state_silently(self):
+        with self.hook_dir() as directory:
             r = self.run_hook(directory, "Stop")
             self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
             report = (Path(directory) / "report-%999").read_text()
             self.assertEqual(report.split("|")[0], "ready")
 
     def test_hook_session_end_clears_report(self):
-        with tempfile.TemporaryDirectory(prefix="ta-hook-") as directory:
+        with self.hook_dir() as directory:
             (Path(directory) / "report-%999").write_text("working|1\n")
             r = self.run_hook(directory, "SessionEnd")
             self.assertEqual(r.returncode, 0, r.stderr)
@@ -865,7 +894,15 @@ const dispose = def.setup({
     await new Promise((resolve) => signal.addEventListener("abort", resolve));
   } } },
 });
-await new Promise((resolve) => setTimeout(resolve, 500));
+// The hook queue dies with this process: wait for all 5 expected calls
+// (slow runners), then a little longer to catch unexpected extras.
+const { existsSync, readFileSync } = await import("node:fs");
+const count = () => existsSync(process.env.LOG)
+  ? readFileSync(process.env.LOG, "utf8").split("\n").filter(Boolean).length : 0;
+for (let i = 0; i < 200 && count() < 5; i++) {
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+await new Promise((resolve) => setTimeout(resolve, 400));
 dispose();
 """
 
@@ -883,15 +920,15 @@ dispose();
                 ["node", "--input-type=module", "-e", self.SCRIPT],
                 capture_output=True, text=True, timeout=30,
                 env={**os.environ, "PLUGIN_URL": plugin.as_uri(),
-                     "TMUX_PANE": "%1", "TMUX_AGENT_BIN": str(bin_)},
+                     "TMUX_PANE": "%1", "TMUX_AGENT_BIN": str(bin_), "LOG": str(log)},
             )
             self.assertEqual(r.returncode, 0, r.stderr)
             deadline = time.time() + 5
             want = [
                 "hook opencode session.execution.started",
                 "hook opencode permission.asked",
-                "hook opencode permission.replied",
-                "hook opencode form.created",
+                "hook opencode session.execution.started",
+                "hook opencode permission.asked",
                 "hook opencode session.execution.succeeded",
             ]
             calls = []
@@ -1211,6 +1248,46 @@ class RemoteTests(unittest.TestCase):
         self.assertEqual(again[1], "--\n")
         self.assertGreaterEqual(time.time() - t, 3)
 
+    def test_send_types_into_agent_panes_in_order(self):
+        self.local("%1", "blocked")
+        r = self.cli("send", "--pane", "%1", "--key", "y", "--text", "go on; rm -rf /", "--key", "Enter")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        sent = [c for c in self.tmux_calls() if c.startswith("send-keys")]
+        self.assertEqual(sent, ["send-keys -t %1 y",
+                                "send-keys -t %1 -l -- go on; rm -rf /",
+                                "send-keys -t %1 Enter"])
+
+    def test_send_refuses_other_panes_and_unlisted_keys(self):
+        self.local("%1", "blocked")
+        r = self.cli("send", "--pane", "%9", "--key", "y")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not an agent pane", r.stderr)
+        for key in ("C-d", "M-x", "F1", "yy", ""):
+            r = self.cli("send", "--pane", "%1", "--key", key)
+            self.assertEqual(r.returncode, 2, key)
+        self.assertEqual([c for c in self.tmux_calls() if c.startswith("send-keys")], [])
+        self.assertEqual(self.cli("send", "--pane", "%1").returncode, 2)
+
+    def test_send_to_a_remote_pane_is_forwarded_to_its_host(self):
+        self.answer("devbox", "blocked|claude|%3|main:1.2|@2|0|/src\n")
+        self.fetch()
+        r = self.cli("send", "--pane", f"{self.KEY}/%3", "--key", "y", "--text", "it's fine")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        call = self.ssh_calls()[-1]
+        self.assertIn("tmux-agent send --pane %3 --key y --text", call)
+        self.assertIn("it\\'s\\ fine", call)
+
+    def test_mobile_rows_are_one_short_line_per_agent(self):
+        self.local("%1", "blocked")
+        self.answer("devbox", "working|codex|%3|main:1.2|@2|40|/src/api\n")
+        self.fetch()
+        r = self.cli("mobile-rows")
+        rows = r.stdout.splitlines()
+        self.assertEqual(len(rows), 2, r.stdout)
+        self.assertRegex(rows[0], r"^\S+ claude  app  \S+\t%1$")
+        self.assertRegex(rows[1], rf"^\S+ codex@devbox  api  \S+\t{re.escape(self.KEY)}/%3$")
+        self.assertTrue(all(len(x.split("\t")[0]) < 45 for x in rows))
+
     def test_hosts_that_leave_are_forgotten(self):
         self.answer("devbox", "idle|claude|%3|main:1.2|@2|0|/src\n")
         self.fetch()
@@ -1307,7 +1384,7 @@ class RemoteTests(unittest.TestCase):
         self.cli("pick")
         rows = [re.sub(r"\x1b\[[0-9;]*m", "", line).split("\t")
                 for line in (self.dir / "rows").read_text().splitlines()]
-        self.assertEqual([pane for _, pane in rows], [f"{self.KEY}/%3", "%1"])
+        self.assertEqual([pane for _, pane, *_ in rows], [f"{self.KEY}/%3", "%1"])
         self.assertIn("claude@devbox", rows[0][0])
         self.answer("devbox", "remote pane text\n")
         r = self.cli("read", "--pane", f"{self.KEY}/%3", "--lines", "5", "--ansi")
@@ -1331,11 +1408,16 @@ class RemoteTests(unittest.TestCase):
         }
         self.answer("devbox", "blocked|claude|%3|main:1.2|@2|0|/src/api\n")
         env = {k: v for k, v in self.env.items() if k != "TMUX_AGENT_QUIET"}
+        env["TMUX_AGENT_NOTIFY_METHOD"] = "desktop"
         self.tmux_log = fake_tmux(self.fake, self.tmux_replies)
         subprocess.run([str(CLI), "remote-refresh"], env=env, timeout=20)
         self.assertTrue(wait_for(lambda: "switch-client -c /dev/pts/4 -t @7"
                                  in self.tmux_calls()), self.tmux_calls())
-        self.assertIn("claude@devbox needs input api · main:1.2", notified.read_text())
+        # The body carries the detail fetched over ssh (the fake ssh answers
+        # every command with the porcelain line), then the directory.
+        body = notified.read_text()
+        self.assertIn("claude@devbox needs input", body)
+        self.assertIn("api · main:1.2", body)
 
 
 if __name__ == "__main__":

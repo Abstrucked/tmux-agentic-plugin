@@ -78,6 +78,17 @@
         ]
       }
     ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/tmux-agent\" hook claude StopFailure"
+          }
+        ]
+      }
+    ],
     "SessionEnd": [
       {
         "hooks": [
