@@ -970,8 +970,8 @@ def fake_ssh(directory):
     return log
 
 
-class RemoteTests(unittest.TestCase):
-    """Agents on other hosts, fetched over (a fake) ssh."""
+class RemoteTestSupport:
+    """Fixture helpers shared by legacy attach and mirror routing tests."""
 
     KEY = "me@devbox.example:22"
     WINDOW_FMT = "#{window_id}|#{@tmux-agent-remote}"
@@ -1002,6 +1002,7 @@ class RemoteTests(unittest.TestCase):
             "TMUX_AGENT_REMOTE_WATCH": "off",
             "TMUX_AGENT_SSH_SOCKETS": f"{self.sockets}/master-*",
             "TMUX_AGENT_REMOTE_INTERVAL": "10",
+            "TMUX_AGENT_REMOTE_VIEW": "attach",
         }
 
     def answer(self, dest, text="", rc=None):
@@ -1039,6 +1040,10 @@ class RemoteTests(unittest.TestCase):
         if live:
             Path(f"{path}.live").write_text("")
         return path
+
+
+class RemoteTests(RemoteTestSupport, unittest.TestCase):
+    """Agents on other hosts, fetched over a (fake) ssh, in legacy mode."""
 
     def test_porcelain_lists_this_hosts_agents_only(self):
         self.local("%1", "blocked")

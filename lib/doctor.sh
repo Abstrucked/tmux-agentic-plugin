@@ -227,6 +227,33 @@ doc_tools() {
     fi
 }
 
+doc_remote_view() {
+    # Remote mirrors are rendered locally, so only mirror mode needs Python.
+    # ta_opt reads the tmux option without changing tmux or plugin state.
+    local view version
+    view=$(ta_opt TMUX_AGENT_REMOTE_VIEW @tmux-agent-remote-view mirror)
+    case $view in
+    mirror)
+        doc_line OK "remote view" "mirror"
+        if ! command -v python3 >/dev/null 2>&1; then
+            doc_line FAIL python3 "not found: remote mirror view needs Python 3.9 or newer locally"
+        elif ! version=$(python3 --version 2>&1); then
+            doc_line FAIL python3 "could not read version: remote mirror view needs Python 3.9 or newer locally"
+        elif ! doc_ver_ge "$version" 3.9; then
+            doc_line FAIL python3 "$version: remote mirror view needs Python 3.9 or newer locally"
+        else
+            doc_line OK python3 "$version"
+        fi
+        ;;
+    attach)
+        doc_line OK "remote view" "attach (legacy); Python is not required"
+        ;;
+    *)
+        doc_line FAIL "remote view" "$view: expected mirror or attach"
+        ;;
+    esac
+}
+
 doc_state() {
     local mode stamp
     doc_line OK plugin "$(doc_realpath "$(dirname "$SELF")/..")"
@@ -253,6 +280,7 @@ doc_state() {
 cmd_doctor() {
     DOC_FAIL=0
     doc_tools
+    doc_remote_view
     doc_state
     doc_claude
     doc_codex

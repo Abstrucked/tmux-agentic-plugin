@@ -257,12 +257,17 @@ ta_remote_fresh() {
 }
 
 ta_remote_in_view() {
-    # $1 key. True when a focused client shows that host's window.
-    local name
+    # $1 key, $2 remote pane. Mirrors suppress only the selected agent;
+    # legacy attachments still represent an entire host.
+    local name key pane marker
     while read -r name; do
         [[ -n $name ]] || continue
-        [[ $(tmux display-message -p -c "$name" '#{@tmux-agent-remote}' 2>/dev/null) == "$1" ]] &&
-            return 0
+        key=$(tmux display-message -p -c "$name" '#{@tmux-agent-remote}' 2>/dev/null) || continue
+        [[ $key == "$1" ]] || continue
+        pane=$(tmux display-message -p -c "$name" '#{@tmux-agent-remote-pane}' 2>/dev/null) || pane=''
+        [[ -n $pane ]] || return 0
+        marker=$(tmux display-message -p -c "$name" '#{@tmux-agent-mirror}' 2>/dev/null) || marker=''
+        [[ $marker == on && $pane == "${2:-}" ]] && return 0
     done < <(tmux list-clients -F '#{?#{m:*focused*,#{client_flags}},#{client_name},}' 2>/dev/null)
     return 1
 }
@@ -280,7 +285,7 @@ ta_remote_notify() {
         after[$pane]=1
         prev=${before[$pane]:-}
         [[ -n $prev && $st != "$prev" ]] || continue
-        if [[ $st == blocked || $st == ready || $st == error ]] && ! ta_remote_in_view "$1"; then
+        if [[ $st == blocked || $st == ready || $st == error ]] && ! ta_remote_in_view "$1" "$pane"; then
             notify "$ag@$2" "$st" "$tgt" "$path" "$1/$pane"
         else
             # Its state moved on (or it is in view): close the old notification.

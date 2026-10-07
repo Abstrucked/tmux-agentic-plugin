@@ -16,6 +16,8 @@
 #   @tmux-agent-raise-command   raises the terminal on a notification click;
 #                               detected by default (lib/raise), off: none
 #   @tmux-agent-remotes         ssh aliases whose agents to show too
+#   @tmux-agent-remote-view     mirror (default): one remote pane per local
+#                               window in remote-agents; attach: nested tmux
 #   @tmux-agent-remote-discover also ask hosts with a live ssh ControlMaster
 #                               connection, on (default) or off
 #   @tmux-agent-remote-tailscale also ask every online Linux/macOS peer of the

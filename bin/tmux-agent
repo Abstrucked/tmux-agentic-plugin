@@ -51,6 +51,8 @@
 #   watch                stream this host's agents to other hosts: lines
 #                        then "--" on every change, and every 5s (they
 #                        keep one running over ssh)
+#   mirror --pane <key/%N>  interactive remote pane view (internal)
+#   mirror-connect --pane <%N>  SSH control-mode endpoint (internal)
 #
 # Remote agents: hosts in @tmux-agent-remotes, plus live ssh ControlMaster
 # connections, are asked over ssh for their agents (lib/remote.sh). They
@@ -73,6 +75,8 @@ SELF="$(readlink -f "$0")"
 . "$(dirname "$SELF")/../lib/engine.sh"
 # shellcheck source=../lib/remote.sh
 . "$(dirname "$SELF")/../lib/remote.sh"
+# shellcheck source=../lib/mirror.sh
+. "$(dirname "$SELF")/../lib/mirror.sh"
 # shellcheck source=../lib/notify.sh
 . "$(dirname "$SELF")/../lib/notify.sh"
 # shellcheck source=../lib/pick.sh
@@ -161,12 +165,14 @@ mark_seen() {
 
 cmd_seen() {
     # $1 pane id, or "<key>/<pane>" for a remote agent.
-    if [[ $1 == */* ]]; then
-        notify_dismiss "$1"
-        ta_remote_ssh "${1%%/*}" seen "${1#*/}" >/dev/null 2>&1 || true
+    local pane
+    pane=$(ta_mirror_identity "$1")
+    if [[ $pane == */* ]]; then
+        notify_dismiss "$pane"
+        ta_remote_ssh "${pane%%/*}" seen "${pane#*/}" >/dev/null 2>&1 || true
         return 0
     fi
-    mark_seen "$1"
+    mark_seen "$pane"
 }
 
 refresh() {
@@ -230,8 +236,15 @@ scan() {
     local -A live=()
     # One ps per scan: detection of every pane reads the same snapshot.
     ta_ps_snapshot
+    local mirrors mirror tag
+    mirrors=$(tmux list-panes -a -F '#{pane_id}|#{@tmux-agent-mirror}' 2>/dev/null || true)
+    local -A mirror_panes=()
+    while IFS='|' read -r mirror tag; do
+        [[ -z $mirror || $tag != on ]] || mirror_panes[$mirror]=1
+    done <<<"$mirrors"
     while IFS='|' read -r pane pid wid target path; do
         [[ -n $pane ]] || continue
+        [[ -z ${mirror_panes[$pane]:-} ]] || continue
         live[$pane]=1
         detect=$(ta_detect_agent "$pid" || true)
         if [[ -z $detect && ! -f $TA_STATE_DIR/report-$pane ]]; then
@@ -725,12 +738,12 @@ cmd_place_strip() {
     fi
 }
 
-goto_remote() {
+goto_remote_attach() {
     # $1 "<key>/<pane>", $2 client name (optional). Each host gets one local
     # window, tagged @tmux-agent-remote, running a nested tmux client over
     # ssh. The first jump opens it attached to the pane's session; later
     # ones reuse it and have the far tmux-agent move that client to the pane.
-    local key=${1%%/*} pane=${1#*/} wid='' w tag session
+    local key=${1%%/*} pane=${1#*/} wid='' w tag session mirror_pane
     local -a client=() target=()
     [[ -z ${2:-} ]] || client=(-c "$2")
     ta_remote_target "$key" || {
@@ -739,6 +752,8 @@ goto_remote() {
     }
     while IFS='|' read -r w tag; do
         if [[ $tag == "$key" ]]; then
+            mirror_pane=$(tmux show-option -wqv -t "$w" @tmux-agent-remote-pane 2>/dev/null || true)
+            [[ -z $mirror_pane ]] || continue
             wid=$w
             break
         fi
@@ -761,6 +776,16 @@ goto_remote() {
     fi
     tmux switch-client ${client[@]+"${client[@]}"} -t "$wid" 2>/dev/null ||
         tmux select-window -t "$wid"
+}
+
+goto_remote() {
+    local view
+    view=$(ta_opt TMUX_AGENT_REMOTE_VIEW @tmux-agent-remote-view mirror)
+    case $view in
+    mirror) goto_remote_mirror "$@" ;;
+    attach) goto_remote_attach "$@" ;;
+    *) echo "invalid @tmux-agent-remote-view: $view (use mirror or attach)" >&2; return 1 ;;
+    esac
 }
 
 goto_pane() {
@@ -803,6 +828,7 @@ cmd_attach() {
         *) shift ;;
         esac
     done
+    [[ -z $from ]] || from=$(ta_mirror_identity "$from")
     refresh
     local st id pane i
     local -a panes=()
@@ -1179,6 +1205,9 @@ main() {
     mobile-rows) mobile_rows ;;
     remote-refresh) cmd_remote_refresh ;;
     watch) cmd_watch ;;
+    mirror) cmd_mirror "$@" ;;
+    mirror-connect) cmd_mirror_connect "$@" ;;
+    mirror-transport) cmd_mirror_transport "${1:-}" ;;
     *)
         usage
         exit 1

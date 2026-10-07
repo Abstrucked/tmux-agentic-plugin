@@ -33,3 +33,7 @@ analytics of any kind.
   connections use your own ssh keys and run `tmux-agent` on the remote host
   to read its agent states. Turn each part off with
   `@tmux-agent-remote-discover off` and `@tmux-agent-remote-tailscale off`.
+- **Remote pane mirrors.** Opening a remote agent sends its screen snapshots
+  and your input over the SSH connection between your own machines. The
+  bridge records only connection state and errors in `mirror-<pane>.status`
+  in the private state directory; it does not record screen contents or input.

@@ -75,6 +75,26 @@ class DoctorTests(DoctorBase):
     def line(self, out, check):
         return next((ln for ln in out.splitlines() if re.match(rf"\w+\s+{re.escape(check)}\s", ln)), "")
 
+    def python(self, version):
+        executable = self.fake / "python3"
+        executable.write_text(f"#!/bin/sh\nprintf '%s\\n' 'Python {version}'\n")
+        executable.chmod(0o755)
+        return executable
+
+    def path_without_python(self):
+        path = self.dir / "minimal-bin"
+        path.mkdir()
+        # Keep the commands doctor needs while ensuring command -v cannot
+        # discover the host's Python installation.
+        for name in ("bash", "env", "readlink", "dirname", "sed", "grep",
+                     "awk", "stat", "date", "id"):
+            source = shutil.which(name)
+            if source:
+                (path / name).symlink_to(source)
+        (path / "tmux").symlink_to(self.fake / "tmux")
+        (path / "ssh").symlink_to(self.fake / "ssh")
+        return str(path)
+
     def test_version_compare(self):
         r = bash(f'. "{DOCTOR}"; '
                  'doc_ver_ge "tmux 3.3a" 3.2 && echo a; doc_ver_ge "tmux next-3.4" 3.2 && echo b; '
@@ -135,6 +155,37 @@ class DoctorTests(DoctorBase):
 
     def test_healthy_exit_zero(self):
         self.assertEqual(self.cli("doctor").returncode, 0)
+
+    def test_mirror_view_accepts_python_39_or_newer(self):
+        self.python("3.11.6")
+        r = self.cli("doctor", TMUX_AGENT_REMOTE_VIEW="mirror")
+        self.assertTrue(self.line(r.stdout, "remote view").startswith("OK"), r.stdout)
+        self.assertIn("Python 3.11.6", self.line(r.stdout, "python3"))
+
+    def test_mirror_view_fails_when_python_is_missing(self):
+        r = self.cli("doctor", TMUX_AGENT_REMOTE_VIEW="mirror", PATH=self.path_without_python())
+        self.assertIn("not found", self.line(r.stdout, "python3"))
+        self.assertTrue(self.line(r.stdout, "python3").startswith("FAIL"), r.stdout)
+        self.assertEqual(r.returncode, 1, r.stdout)
+
+    def test_mirror_view_fails_with_old_python(self):
+        self.python("3.8.18")
+        r = self.cli("doctor", TMUX_AGENT_REMOTE_VIEW="mirror")
+        self.assertTrue(self.line(r.stdout, "python3").startswith("FAIL"), r.stdout)
+        self.assertIn("3.9 or newer", self.line(r.stdout, "python3"))
+        self.assertEqual(r.returncode, 1, r.stdout)
+
+    def test_attach_view_does_not_require_python(self):
+        r = self.cli("doctor", TMUX_AGENT_REMOTE_VIEW="attach", PATH=self.path_without_python())
+        self.assertIn("Python is not required", self.line(r.stdout, "remote view"))
+        self.assertEqual(self.line(r.stdout, "python3"), "")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_unknown_remote_view_fails_clearly(self):
+        r = self.cli("doctor", TMUX_AGENT_REMOTE_VIEW="window")
+        self.assertTrue(self.line(r.stdout, "remote view").startswith("FAIL"), r.stdout)
+        self.assertIn("expected mirror or attach", self.line(r.stdout, "remote view"))
+        self.assertEqual(r.returncode, 1, r.stdout)
 
     def test_notify_does_not_leak_command(self):
         r = self.cli("doctor", TMUX_AGENT_NOTIFY_COMMAND="echo SECRETCMD")

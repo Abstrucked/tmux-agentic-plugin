@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Remote agent jumps now open live pane mirrors in the local `remote-agents`
+  session, preserving the remote pane's layout, size and process. Mirrors use
+  a persistent SSH control-mode bridge, retry disconnects without replaying
+  input, and support panning and history scrolling. This default needs Python
+  3.9+ locally and the updated plugin on both hosts. Set
+  `@tmux-agent-remote-view attach` for the previous nested-tmux behavior or
+  while upgrading remote hosts; it has no Python requirement. tmux 3.2+
+  remains the minimum for either view.
+- Mirror panes retain their remote agent identity for seen tracking and urgent
+  cycling, and are excluded from local agent detection. Looking at one mirror
+  suppresses notifications only for that agent, rather than the whole host.
+
 ## 0.3.0 (2026-10-07)
 
 - Desktop notifications for blocked and error agents use `normal` urgency, so

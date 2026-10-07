@@ -1,6 +1,6 @@
 {
   "name": "tmux-agentic",
-  "description": "Claude Code plugin that reports agent state to tmux.",
+  "description": "Claude Code hooks that report agent state to tmux on local and SSH hosts.",
   "owner": {
     "name": "Abstrucked",
     "url": "https://github.com/Abstrucked"
@@ -9,7 +9,7 @@
     {
       "name": "tmux-agentic-plugin",
       "source": "./",
-      "description": "Reports Claude Code session state to the tmux agent strip, picker and notifications.",
+      "description": "Reports Claude Code session state, including API errors, to the tmux agent strip, picker and notifications on local and SSH hosts.",
       "version": "0.3.0"
     }
   ]
