@@ -81,9 +81,9 @@ class NotifyTests(unittest.TestCase):
     def test_notify_send_content_per_state(self):
         self.tmux()
         log = self.notify_send()
-        cases = {"blocked": ("needs input", "critical"),
+        cases = {"blocked": ("needs input", "normal"),
                  "ready": ("finished", "normal"),
-                 "error": ("hit an error", "critical")}
+                 "error": ("hit an error", "normal")}
         for state, (what, urgency) in cases.items():
             log.write_text("")
             self.run_notify(state=state, env={"TMUX_AGENT_NOTIFY_METHOD": "desktop"})
@@ -253,7 +253,7 @@ class NotifyTests(unittest.TestCase):
         self.assertEqual(got["TA_AGENT"], "claude")
         self.assertEqual(got["TA_PANE"], "%3")
         self.assertEqual(got["TA_PATH"], "/home/u/proj")
-        self.assertEqual(got["TA_URGENCY"], "critical")
+        self.assertEqual(got["TA_URGENCY"], "normal")
 
     def test_notify_command_never_interpolates_data(self):
         self.tmux()

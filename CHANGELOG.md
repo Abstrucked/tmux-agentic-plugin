@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Desktop notifications for blocked and error agents use `normal` urgency, so
+  they take your notification daemon's theme and timeout instead of the
+  red, never-expiring `critical` style. `@tmux-agent-notify-urgency critical`
+  restores it; `@tmux-agent-notify-timeout` sets the seconds. They now close
+  when you look at the agent (focus, jump, answer, pane gone) and a new one
+  replaces the open one, via `notify-send -p/-r` and a D-Bus close.
 - Notifications and the picker say why an agent stopped: the command awaiting
   permission, the question, the first line of the final answer or the error.
   Hooks record it (needs jq); `status --json` and `detail --pane` show it.

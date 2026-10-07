@@ -7,19 +7,108 @@
 [[ -n "${_TA_NOTIFY_LOADED:-}" ]] && return 0
 _TA_NOTIFY_LOADED=1
 
+notify_idfile() {
+    # $1 pane id ("<key>/<pane>" for a remote agent). The file holding the id
+    # of the pane's open desktop notification, kept inside the state dir.
+    printf '%s/notif-%s' "$TA_STATE_DIR" "${1//[^A-Za-z0-9%@._-]/_}"
+}
+
+notify_wait_once() {
+    # $1 1 when the command prints the notification id first (-p), $2 id
+    # file, then the notify-send command. Sets nw_id, nw_action and nw_rc in
+    # the caller. The id is stored as soon as it is known and removed again
+    # when the notification closes, unless a replacement stored its own.
+    local withid=$1 file=$2 line first=1
+    shift 2
+    nw_id='' nw_action='' nw_rc=1
+    while IFS= read -r line; do
+        if [[ $line == rc:* ]]; then
+            nw_rc=${line#rc:}
+            continue
+        fi
+        [[ -n $line ]] || continue
+        if ((withid && first)); then
+            first=0
+            if [[ $line =~ ^[0-9]+$ ]]; then
+                nw_id=$line
+                printf '%s\n' "$line" >"$file" 2>/dev/null || true
+                continue
+            fi
+        fi
+        first=0
+        [[ -n $nw_action ]] || nw_action=$line
+    done < <(
+        "$@"
+        # A leading newline: the command's last line may lack its own.
+        printf '\nrc:%s\n' "$?"
+    )
+    if [[ -n $nw_id && -f $file && $(cat "$file" 2>/dev/null) == "$nw_id" ]]; then
+        rm -f "$file"
+    fi
+}
+
 notify_wait() {
     # $1 urgency, $2 pane id, $3 title, $4 body. Clicking the notification
     # (its default action) focuses the pane. --wait holds until the
     # notification closes; libnotify before 0.7.9 has no --wait, so fall back
-    # to a plain notification.
-    local action
-    if ! action=$(notify-send -a tmux-agent -u "$1" -A default=Show --wait "$3" "$4"); then
-        notify-send -a tmux-agent -u "$1" "$3" "$4" || true
-        return 0
+    # to a plain notification. -p (0.8) gives the notification's id, kept so
+    # that it can be replaced or closed (notify_dismiss).
+    local file id='' secs
+    local -a tmo=() rep=()
+    local nw_id nw_action nw_rc
+    file=$(notify_idfile "$2")
+    secs=$(ta_opt TMUX_AGENT_NOTIFY_TIMEOUT @tmux-agent-notify-timeout '')
+    [[ ! $secs =~ ^[0-9]+$ ]] || tmo+=(-t "$((secs * 1000))")
+    mkdir -p "$TA_STATE_DIR" 2>/dev/null || true
+    if [[ -f $file ]]; then
+        read -r id <"$file" 2>/dev/null || true
+        [[ ! $id =~ ^[0-9]+$ ]] || rep+=(-r "$id")
     fi
-    if [[ $action == default ]]; then
+    notify_wait_once 1 "$file" notify-send -a tmux-agent -u "$1" ${tmo[@]+"${tmo[@]}"} ${rep[@]+"${rep[@]}"} \
+        -p -A default=Show --wait "$3" "$4"
+    if ((nw_rc != 0)); then
+        # No -p or no --wait: the old way, then a plain notification.
+        notify_wait_once 0 "$file" notify-send -a tmux-agent -u "$1" ${tmo[@]+"${tmo[@]}"} \
+            -A default=Show --wait "$3" "$4"
+        if ((nw_rc != 0)); then
+            notify-send -a tmux-agent -u "$1" "$3" "$4" || true
+            return 0
+        fi
+    fi
+    if [[ $nw_action == default ]]; then
         "$SELF" focus --pane "$2"
     fi
+}
+
+notify_dismiss() {
+    # $1 pane id. Close the pane's open desktop notification, if any: its
+    # waiting notify-send then returns too. Off the caller's path: the D-Bus
+    # call runs in the background and may be slow or fail, which is ignored.
+    local file id=''
+    file=$(notify_idfile "$1")
+    [[ -f $file ]] || return 0
+    read -r id <"$file" 2>/dev/null || true
+    rm -f "$file"
+    [[ $id =~ ^[0-9]+$ ]] || return 0
+    (
+        [[ -z ${TA_LOCK_FD:-} ]] || exec {TA_LOCK_FD}>&-
+        trap '' HUP
+        local -a t=()
+        command -v timeout >/dev/null 2>&1 && t=(timeout 2)
+        if command -v gdbus >/dev/null 2>&1; then
+            ${t[@]+"${t[@]}"} gdbus call --session --dest org.freedesktop.Notifications \
+                --object-path /org/freedesktop/Notifications \
+                --method org.freedesktop.Notifications.CloseNotification "$id"
+        elif command -v busctl >/dev/null 2>&1; then
+            ${t[@]+"${t[@]}"} busctl --user call org.freedesktop.Notifications \
+                /org/freedesktop/Notifications org.freedesktop.Notifications \
+                CloseNotification u "$id"
+        elif command -v dbus-send >/dev/null 2>&1; then
+            ${t[@]+"${t[@]}"} dbus-send --session --dest=org.freedesktop.Notifications \
+                /org/freedesktop/Notifications \
+                org.freedesktop.Notifications.CloseNotification "uint32:$id"
+        fi
+    ) </dev/null >/dev/null 2>&1 &
 }
 
 notify_desktop_ok() {
@@ -64,12 +153,17 @@ notify_terminal() {
 notify_deliver() {
     # $1 method, $2 agent, $3 state, $4 tmux target, $5 working directory,
     # $6 pane id, $7 detail ("" when none). Builds the text and dispatches.
-    local method=$1 cmd what urgency title body
+    local method=$1 cmd what urgency=normal title body
     case $3 in
-        blocked) what='needs input' urgency=critical ;;
-        error) what='hit an error' urgency=critical ;;
-        *) what=finished urgency=normal ;;
+        blocked) what='needs input' ;;
+        error) what='hit an error' ;;
+        *) what=finished ;;
     esac
+    # Critical is red and sticky in most daemons: opt-in, blocked and error only.
+    if [[ $3 == blocked || $3 == error ]] &&
+        [[ $(ta_opt TMUX_AGENT_NOTIFY_URGENCY @tmux-agent-notify-urgency normal) == critical ]]; then
+        urgency=critical
+    fi
     title="$2 $what" body="${5##*/} · $4"
     [[ -z $7 ]] || body="$7"$'\n'"$body"
     local ttitle tbody
