@@ -52,16 +52,17 @@ class NotifyTests(unittest.TestCase):
         return log
 
     def run_notify(self, agent="claude", state="blocked", pane="%3", env=None,
-                   path="/home/u/proj"):
+                   path="/home/u/proj", self_cmd="/bin/true"):
         # PATH is just the stand-ins plus the system tools bash needs, so a
         # real notify-send or osascript never leaks in.
         e = {"PATH": str(self.bin), "HOME": str(self.dir),
              "DISPLAY": ":0", **(env or {})}
-        unset = " ".join(k for k in ("DISPLAY", "WAYLAND_DISPLAY") if e.get(k) is None)
-        for k in ("DISPLAY", "WAYLAND_DISPLAY"):
+        keys = ("DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS")
+        unset = " ".join(k for k in keys if e.get(k) is None)
+        for k in keys:
             if e.get(k) is None:
                 e.pop(k, None)
-        script = (f'unset {unset or "_ta_none"}; . "{REMOTE}"; . "{NOTIFY}"; SELF=/bin/true; '
+        script = (f'unset {unset or "_ta_none"}; . "{REMOTE}"; . "{NOTIFY}"; SELF={shlex.quote(self_cmd)}; '
                   f'TA_STATE_DIR="{self.state}"; TA_LOCK_FD=; '
                   'notify "$@"; wait')
         r = bash(script, agent, state, "s:1.0", path, pane, env=e)
@@ -167,6 +168,77 @@ class NotifyTests(unittest.TestCase):
         log = self.notify_send()
         self.run_notify(env={"DISPLAY": ":0"})
         self.assertIn("claude needs input", self.wait_for(log).decode())
+
+    DBUS = "unix:path=/run/user/1000/bus"
+    NO_DISPLAY = {"DISPLAY": None, "WAYLAND_DISPLAY": None}
+
+    def test_auto_picks_desktop_with_dbus_only(self):
+        self.tmux()
+        log = self.notify_send()
+        self.run_notify(env={**self.NO_DISPLAY, "DBUS_SESSION_BUS_ADDRESS": self.DBUS})
+        self.assertIn("claude needs input", self.wait_for(log).decode())
+        self.assertEqual(self.tty.read_text(), "")
+
+    def test_auto_picks_desktop_with_dbus_in_tmux_env(self):
+        self.tmux({"show-environment -g DBUS_SESSION_BUS_ADDRESS":
+                   f"DBUS_SESSION_BUS_ADDRESS={self.DBUS}\n"})
+        log = self.notify_send()
+        self.run_notify(env=self.NO_DISPLAY)
+        self.assertIn("claude needs input", self.wait_for(log).decode())
+
+    def test_auto_picks_terminal_without_dbus_or_display(self):
+        self.tmux({"list-clients -F #{client_tty}|#{client_termname}":
+                   f"{self.tty}|xterm-ghostty\n"})
+        log = self.notify_send()
+        self.run_notify(env=self.NO_DISPLAY)
+        self.assertIn(f"{ESC}]9;", self.wait_for(self.tty).decode())
+        self.assertFalse(log.exists())
+
+    def fake_self(self, detail="run the tests?"):
+        calls = self.dir / "self.log"
+        script = self.dir / "fake-self"
+        script.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >>{shlex.quote(str(calls))}\n'
+                          f'printf "%s\\n" {shlex.quote(detail)}\n')
+        script.chmod(0o755)
+        return script, calls
+
+    def test_remote_pane_fetches_detail_through_self(self):
+        self.tmux()
+        log = self.notify_send()
+        script, calls = self.fake_self("run <b>x</b>?")
+        self.run_notify(pane="k/%3", self_cmd=str(script),
+                        env={"TMUX_AGENT_NOTIFY_METHOD": "desktop"})
+        out = self.wait_for(log).decode()
+        self.assertIn("run &lt;b&gt;x&lt;/b&gt;?\nproj · s:1.0", out)
+        self.assertEqual(calls.read_text(), "detail --pane k/%3\n")
+
+    def test_remote_pane_detail_reaches_notify_command(self):
+        self.tmux()
+        dump = self.dir / "env.txt"
+        script, _ = self.fake_self()
+        self.run_notify(pane="k/%3", self_cmd=str(script), env={
+            "TMUX_AGENT_NOTIFY_METHOD": "terminal",
+            "TMUX_AGENT_NOTIFY_COMMAND": f"env >{dump}"})
+        got = dict(line.split("=", 1) for line in
+                   self.wait_for(dump).decode().splitlines() if "=" in line)
+        self.assertEqual(got["TA_BODY"], "run the tests? proj · s:1.0")
+        self.assertEqual(got["TA_PANE"], "k/%3")
+
+    def test_remote_pane_without_detail_still_notifies(self):
+        self.tmux()
+        log = self.notify_send()
+        self.run_notify(pane="k/%3", self_cmd="/bin/false",
+                        env={"TMUX_AGENT_NOTIFY_METHOD": "desktop"})
+        self.assertIn("proj · s:1.0", self.wait_for(log).decode())
+
+    def test_local_pane_never_calls_self(self):
+        self.tmux()
+        log = self.notify_send()
+        script, calls = self.fake_self()
+        (self.state / "detail-%3").write_text("1|perm|local one\n")
+        self.run_notify(self_cmd=str(script), env={"TMUX_AGENT_NOTIFY_METHOD": "desktop"})
+        self.assertIn("local one\nproj", self.wait_for(log).decode())
+        self.assertFalse(calls.exists())
 
     def test_notify_command_env_contract(self):
         self.tmux()

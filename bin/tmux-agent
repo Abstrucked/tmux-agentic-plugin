@@ -25,23 +25,27 @@
 #   place-strip [--max N]  centre the strip in the status bar
 #   attach [--next|--urgent] [--from <pane>]
 #                        jump to the most urgent agent pane; --urgent only
-#                        to blocked, then ready ones (prefix + A), cycling
+#                        to blocked, error, then ready ones (prefix + A), cycling
 #                        past --from
 #   focus --pane <id>    switch a client to the pane and raise its terminal
 #                        window (what clicking a notification does)
 #   refresh              update cached state now
-#   send --pane <id> [--expect-state S] (--key K | --text T)...
+#   send --pane <id> [--expect-state S] [--expect-epoch E] (--key K | --text T)...
 #                        type into an agent pane, in order: --key takes
 #                        Enter Escape Tab Space BSpace Up Down Left Right
 #                        C-c or one of y n Y N 0-9; --text is literal.
 #                        With --expect-state, exit 3 without typing unless
-#                        the pane is in that state
+#                        the pane is in that state; with --expect-epoch, or
+#                        unless its detail line (a prompt) is still E's
 #   detail --pane <id>   the one-line context a hook reported (what is
 #                        being asked, what the agent said, the error)
 #   diff --pane <id>     git diff of the pane's directory (stat, diff and
 #                        untracked files)
 #   mobile               tap-friendly agent list and action menu for a
 #                        phone terminal (Termius over ssh)
+#   doctor               check the install, hooks, cache, remotes and
+#                        notifications
+#   explain --pane <id>  why a pane shows the state it does
 #   remotes              list remote hosts and how their last fetch went
 #   remote-refresh       fetch every remote host's agents now
 #   watch                stream this host's agents to other hosts: lines
@@ -54,7 +58,8 @@
 # a window with a nested tmux client on that host. Pane arguments take
 # "<key>/<pane>" ids for them.
 #
-# State is cached in $TMUX_AGENT_STATE_DIR (default /tmp/tmux-agent-$UID).
+# State is cached in $TMUX_AGENT_STATE_DIR (default
+# $XDG_RUNTIME_DIR or /tmp, then tmux-agent-$UID/<tmux server>, mode 0700).
 # tmux's status interval drives refreshes. Desktop notifications are off
 # with the tmux option @tmux-agent-notify off (or TMUX_AGENT_QUIET=1).
 # Clicking one runs focus; lib/raise finds the window (see
@@ -72,8 +77,50 @@ SELF="$(readlink -f "$0")"
 . "$(dirname "$SELF")/../lib/notify.sh"
 # shellcheck source=../lib/pick.sh
 . "$(dirname "$SELF")/../lib/pick.sh"
+# shellcheck source=../lib/doctor.sh
+. "$(dirname "$SELF")/../lib/doctor.sh"
 
-declare -r TA_STATE_DIR="${TMUX_AGENT_STATE_DIR:-${TMPDIR:-/tmp}/tmux-agent-$(id -u)}"
+private_dir() {
+    # $1 path. Create it 0700 if missing; true only for a real directory
+    # (not a symlink) that is ours.
+    [[ -L $1 ]] && return 1
+    [[ -d $1 ]] || (umask 077 && mkdir "$1" 2>/dev/null) || [[ -d $1 ]] || return 1
+    [[ ! -L $1 && -d $1 && -O $1 ]] || return 1
+    chmod 700 "$1" 2>/dev/null || true
+}
+
+default_state_dir() {
+    # The state holds prompt lines and permission commands, so it must not
+    # be readable by other users, nor planted by one: the per-user parent
+    # and the per-server dir are made 0700 and must be ours and not
+    # symlinks. Otherwise this run gets a private temp dir instead.
+    local base=${TMPDIR:-/tmp} parent dir
+    [[ -n ${XDG_RUNTIME_DIR:-} && -d $XDG_RUNTIME_DIR ]] && base=$XDG_RUNTIME_DIR
+    parent="$base/tmux-agent-$UID"
+    dir="$parent/$(ta_server_key)"
+    if private_dir "$parent" && private_dir "$dir"; then
+        printf '%s' "$dir"
+        return 0
+    fi
+    # The fallback must be the same dir on every run (the status bar runs
+    # us every few seconds, and seen marks and reports live there).
+    echo "tmux-agent: $parent is not a private directory of yours; using a cache dir instead" >&2
+    base=${XDG_CACHE_HOME:-${HOME:-}/.cache}
+    if [[ -n ${HOME:-}${XDG_CACHE_HOME:-} ]]; then
+        [[ -d $base ]] || (umask 077 && mkdir -p "$base" 2>/dev/null) || true
+        parent="$base/tmux-agent"
+        dir="$parent/$(ta_server_key)"
+        if [[ -d $base ]] && private_dir "$parent" && private_dir "$dir"; then
+            printf '%s' "$dir"
+            return 0
+        fi
+    fi
+    mktemp -d "${TMPDIR:-/tmp}/tmux-agent-XXXXXX"
+}
+
+TA_STATE_DIR=${TMUX_AGENT_STATE_DIR:-}
+[[ -n $TA_STATE_DIR ]] || TA_STATE_DIR=$(default_state_dir)
+declare -r TA_STATE_DIR
 declare -r TA_PANE_FMT='#{pane_id}|#{pane_pid}|#{window_id}|#{session_name}:#{window_index}.#{pane_index}|#{pane_current_path}'
 declare -r TA_REPORT_TTL=300
 
@@ -111,12 +158,25 @@ mark_seen() {
     now >"$TA_STATE_DIR/seen-$1"
 }
 
+cmd_seen() {
+    # $1 pane id, or "<key>/<pane>" for a remote agent.
+    if [[ $1 == */* ]]; then
+        ta_remote_ssh "${1%%/*}" seen "${1#*/}" >/dev/null 2>&1 || true
+        return 0
+    fi
+    mark_seen "$1"
+}
+
 refresh() {
     # Hooks refresh in the background while the status bar polls. Serialize
     # scans so a transition is seen, and notified, exactly once.
     # The lock fd is global so notify() can close it in its background job.
-    local rc=0
-    mkdir -p "$TA_STATE_DIR"
+    # Giving up (no lock, no writable state dir) is quiet for readers, who
+    # fall back to the cached state; TA_REFRESH_STRICT=1 makes it fail, for
+    # callers that must not act on stale state (send's guard).
+    local rc=0 giveup=0
+    [[ -z ${TA_REFRESH_STRICT:-} ]] || giveup=1
+    mkdir -p "$TA_STATE_DIR" 2>/dev/null || return "$giveup"
     if command -v flock >/dev/null 2>&1; then
         exec {TA_LOCK_FD}>"$TA_STATE_DIR/lock"
         flock "$TA_LOCK_FD"
@@ -125,19 +185,32 @@ refresh() {
         TA_LOCK_FD=''
         return "$rc"
     fi
-    # No flock (macOS): mkdir is atomic. A lock held past 10s was left by
-    # a killed scan, so take it over.
-    local lock="$TA_STATE_DIR/lock.d" tries=0
+    # No flock (macOS): mkdir is atomic. A lock held past ~10s was left by
+    # a killed scan, so take it over. Give up after ~20s (or at once when
+    # the state dir is not writable) instead of spinning: the caller's next
+    # refresh tries again. TMUX_AGENT_LOCK_TRIES (0.1s each) shortens it.
+    local lock="$TA_STATE_DIR/lock.d" tries=0 max=${TMUX_AGENT_LOCK_TRIES:-200}
+    [[ $max =~ ^[0-9]+$ ]] || max=200
+    [[ -d $TA_STATE_DIR && -w $TA_STATE_DIR ]] || return "$giveup"
     until mkdir "$lock" 2>/dev/null; do
-        if ((++tries > 100)); then
-            rmdir "$lock" 2>/dev/null || true
-            tries=0
-        fi
-        sleep 0.1
+        ((++tries < max)) || return "$giveup"
+        ((tries != max / 2)) || rmdir "$lock" 2>/dev/null || true
+        sleep 0.1 || true
     done
     scan "$@" || rc=$?
     rmdir "$lock" 2>/dev/null || true
     return "$rc"
+}
+
+report_authoritative() {
+    # $1 reported state, $2 its epoch, $3 now, $4 1 when an agent process is
+    # detected. A hook-reported state wins over the heuristics. Agent hooks
+    # report every transition, so their settled states hold while the agent
+    # lives. "working" and reports without a detected agent expire: an
+    # interrupted turn fires no Stop hook.
+    [[ -n $1 ]] || return 1
+    (($3 - $2 < TA_REPORT_TTL)) && return 0
+    [[ $4 == 1 && $1 != working ]]
 }
 
 scan() {
@@ -175,16 +248,12 @@ scan() {
             [[ $prev_cpu =~ ^[0-9]+$ ]] || prev_cpu=0
             [[ $changed =~ ^[0-9]+$ ]] || changed=$now_s
         fi
-        # A hook-reported state wins over the heuristics. Agent hooks report
-        # every transition, so their settled states hold while the agent
-        # lives. "working" and reports without a detected agent expire:
-        # an interrupted turn fires no Stop hook.
+        # A hook-reported state wins over the heuristics (report_authoritative).
         rstate='' repoch=0 authoritative=0
         if [[ -f $TA_STATE_DIR/report-$pane ]]; then
             IFS='|' read -r rstate repoch <"$TA_STATE_DIR/report-$pane" || true
             [[ $repoch =~ ^[0-9]+$ ]] || repoch=0
-            if [[ -n $rstate ]] && { ((now_s - repoch < TA_REPORT_TTL)) ||
-                { [[ -n $detect && $rstate != working ]]; }; }; then
+            if report_authoritative "$rstate" "$repoch" "$now_s" "$([[ -n $detect ]] && echo 1 || echo 0)"; then
                 authoritative=1
             fi
         fi
@@ -443,10 +512,13 @@ pane_arg() {
 }
 
 cmd_detail() {
-    # Remote hosts keep their details to themselves for now.
     local pane
     pane=$(pane_arg "$@")
-    [[ -n $pane && $pane != */* ]] || return 0
+    [[ -n $pane ]] || return 0
+    if [[ $pane == */* ]]; then
+        ta_remote_ssh "${pane%%/*}" detail --pane "${pane#*/}" 2>/dev/null || true
+        return 0
+    fi
     ta_detail_read "$TA_STATE_DIR" "$pane" || true
 }
 
@@ -492,6 +564,11 @@ cmd_wait() {
         *) shift ;;
         esac
     done
+    if [[ $pane == */* ]]; then
+        ta_remote_ssh_stream "${pane%%/*}" wait --pane "${pane#*/}" --state "$want" \
+            ${timeout:+--timeout "$timeout"}
+        return
+    fi
     while :; do
         refresh
         st=''
@@ -542,7 +619,13 @@ hook_detail() {
         ;;
     Notification) prog='.message // ""' ;;
     Stop) prog='(.last_assistant_message // "") | split("\n") | map(select(test("\\S"))) | .[0] // ""' ;;
-    StopFailure) prog='"\(.error_type // ""): \(.error_message // "")" | if . == ": " then "" else . end' ;;
+    StopFailure)
+        prog='((.error // .error_type // "") | tostring) as $e
+            | ((.error_details // .error_message // "") | tostring) as $m
+            | (if $e != "" and $m != "" then "\($e): \($m)" else "\($e)\($m)" end) as $t
+            | if $t != "" then $t
+              else (.last_assistant_message // "") | tostring | split("\n") | map(select(test("\\S"))) | .[0] // "" end'
+        ;;
     UserPromptSubmit) prog='(.prompt // .user_prompt // "") | split("\n") | map(select(test("\\S"))) | .[0] // ""' ;;
     *) return 0 ;;
     esac
@@ -690,7 +773,7 @@ goto_pane() {
 
 cmd_attach() {
     # --next: most urgent agent in any state. --urgent: only agents that
-    # need you, blocked before ready. --from <pane>: the candidate after
+    # need you, blocked, then error, then ready. --from <pane>: the candidate after
     # that pane, wrapping, so repeated jumps cycle through them.
     local urgent=0 from=''
     while (($#)); do
@@ -710,7 +793,7 @@ cmd_attach() {
     local st id pane i
     local -a panes=()
     while IFS='|' read -r st _ _ _ _ id _; do
-        [[ $urgent == 0 || $st == blocked || $st == ready ]] && panes+=("$id")
+        [[ $urgent == 0 || $st == blocked || $st == error || $st == ready ]] && panes+=("$id")
     done < <(each_agent)
     if ((${#panes[@]} == 0)); then
         if ((urgent)); then
@@ -788,7 +871,7 @@ ta_send_key_ok() {
 cmd_send() {
     # --pane <id|key/pane>, then --key and --text in the order to type them.
     # Only agent panes take input. A remote one is forwarded to its host.
-    local pane='' expect='' i st=''
+    local pane='' expect='' epoch='' cur rstate repoch ag i st=''
     local -a acts=()
     while (($#)); do
         case $1 in
@@ -798,6 +881,10 @@ cmd_send() {
             ;;
         --expect-state)
             expect=${2:-}
+            shift 2 || break
+            ;;
+        --expect-epoch)
+            epoch=${2:-}
             shift 2 || break
             ;;
         --key)
@@ -825,18 +912,42 @@ cmd_send() {
     fi
     if [[ $pane == */* ]]; then
         ta_remote_ssh "${pane%%/*}" send --pane "${pane#*/}" \
-            ${expect:+--expect-state "$expect"} "${acts[@]}"
+            ${expect:+--expect-state "$expect"} ${epoch:+--expect-epoch "$epoch"} "${acts[@]}"
         return
     fi
-    refresh
+    # A guarded send must not trust a scan up to 3s old: a hook report
+    # may already say the prompt is gone.
+    if [[ -n $expect || -n $epoch ]]; then
+        TA_REFRESH_STRICT=1 refresh 1 || {
+            echo "send: could not refresh state" >&2
+            return 3
+        }
+    else
+        refresh
+    fi
     [[ -f $TA_STATE_DIR/state-$pane ]] || {
         echo "send: not an agent pane: $pane" >&2
         return 1
     }
     if [[ -n $expect ]]; then
-        IFS='|' read -r st _ <"$TA_STATE_DIR/state-$pane" || true
+        IFS='|' read -r st ag _ <"$TA_STATE_DIR/state-$pane" || true
+        # A report newer than the scan outranks the cached state.
+        if [[ -f $TA_STATE_DIR/report-$pane ]]; then
+            IFS='|' read -r rstate repoch <"$TA_STATE_DIR/report-$pane" || true
+            [[ $repoch =~ ^[0-9]+$ ]] || repoch=0
+            if report_authoritative "$rstate" "$repoch" "$(now)" "$([[ $ag != custom ]] && echo 1 || echo 0)"; then
+                st=$rstate
+            fi
+        fi
         if [[ $st != "$expect" ]]; then
             echo "send: pane changed: now $st" >&2
+            return 3
+        fi
+    fi
+    if [[ -n $epoch ]]; then
+        cur=$(ta_detail_epoch "$TA_STATE_DIR" "$pane" || true)
+        if [[ $cur != "$epoch" ]]; then
+            echo "send: pane changed: new request" >&2
             return 3
         fi
     fi
@@ -923,34 +1034,29 @@ cmd_mobile() {
         echo "tmux-agent mobile needs fzf" >&2
         return 1
     }
-    local sel port ticker='' reload
-    local -a listen=()
+    local sel reload
     reload="reload($SELF mobile-rows)"
-    if fzf --help 2>/dev/null | grep -q -- '--listen' && command -v curl >/dev/null 2>&1; then
-        port=$((20000 + RANDOM % 20000))
-        listen=("--listen=$port")
-    fi
+    FZF_LISTEN_TICKER=''
+    # Ctrl-C or a dropped ssh session must not leave the ticker behind.
+    trap 'fzf_listen_stop; trap - INT TERM HUP; exit 130' INT TERM HUP
     while :; do
         if [[ -z $(mobile_rows) ]]; then
             echo "no agent panes (retrying, Ctrl-C to quit)" >&2
             sleep 3
             continue
         fi
-        if ((${#listen[@]})); then
-            # Refresh the list every 2s through fzf's listen port.
-            (while sleep 2; do
-                curl -s -XPOST "localhost:$port" -d "$reload" >/dev/null 2>&1 || break
-            done) &
-            ticker=$!
-        fi
-        sel=$(mobile_rows | fzf --ansi --reverse --no-sort --no-scrollbar ${listen[@]+"${listen[@]}"} \
+        # Refresh the list every 2s through fzf's keyed listen port.
+        fzf_listen_start "$reload"
+        sel=$(mobile_rows | fzf --ansi --reverse --no-sort --no-scrollbar ${FZF_LISTEN_ARGS[@]+"${FZF_LISTEN_ARGS[@]}"} \
             --delimiter=$'\t' --with-nth=1 --header 'tap an agent' \
             --bind "ctrl-r:$reload" \
             --preview "$SELF read --pane {2} --lines 40 --ansi" \
             --preview-window 'bottom,55%,wrap') || sel=''
-        [[ -z $ticker ]] || kill "$ticker" 2>/dev/null || true
-        ticker=''
-        [[ -n $sel ]] || return 0
+        fzf_listen_stop
+        [[ -n $sel ]] || {
+            trap - INT TERM HUP
+            return 0
+        }
         mobile_menu "${sel##*$'\t'}"
     done
 }
@@ -1032,11 +1138,11 @@ main() {
     local cmd=${1:-}
     shift || true
     case $cmd in
-    refresh) refresh "${1:-0}" ;;
+    refresh) TA_REFRESH_STRICT=1 refresh "${1:-0}" ;;
     strip) strip "$@" ;;
     window-dot) window_dot "${1:-}" ;;
     pane-label) pane_label "${1:-}" ;;
-    seen) mark_seen "${1:-}" ;;
+    seen) cmd_seen "${1:-}" ;;
     status) cmd_status "$@" ;;
     pick) cmd_pick ;;
     read) cmd_read "$@" ;;
@@ -1054,6 +1160,8 @@ main() {
     detail) cmd_detail "$@" ;;
     diff) cmd_diff "$@" ;;
     mobile) cmd_mobile ;;
+    doctor) cmd_doctor "$@" ;;
+    explain) cmd_explain "$@" ;;
     mobile-rows) mobile_rows ;;
     remote-refresh) cmd_remote_refresh ;;
     watch) cmd_watch ;;

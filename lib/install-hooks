@@ -17,10 +17,12 @@ declare -r ROOT
 declare -r BIN="$ROOT/bin/tmux-agent"
 REMOVE=0
 
-# Events each agent reports, "Event" or "Event=matcher". Claude's
-# Notification only means blocked for permission and question dialogs.
+# Events each agent reports: "Event", optionally with "@seconds" (hook
+# timeout, default 5) and "=matcher". Claude's Notification only means
+# blocked for permission and question dialogs. Codex allows SessionEnd and
+# Interrupt handlers at most 3 s.
 declare -r CLAUDE_EVENTS='SessionStart UserPromptSubmit PreToolUse PostToolUse PermissionRequest Notification=permission_prompt|elicitation_dialog Stop StopFailure SessionEnd'
-declare -r CODEX_EVENTS='SessionStart UserPromptSubmit PreToolUse PostToolUse PermissionRequest Stop SessionEnd'
+declare -r CODEX_EVENTS='SessionStart UserPromptSubmit PreToolUse PostToolUse PermissionRequest Stop SessionEnd@3 Interrupt@3'
 
 merge_hooks() {
     # $1 JSON settings file, $2 agent name, $3 event list. Drops previous
@@ -39,9 +41,9 @@ merge_hooks() {
             | with_entries(.value |= map(select(ours | not)))
             | with_entries(select(.value | length > 0)))
         | reduce ($events | split(" ")[] | select(. != "")) as $spec (.;
-            ($spec | split("=")) as [$event, $matcher]
+            ($spec | capture("^(?<event>[^=@]+)(@(?<secs>[0-9]+))?(=(?<matcher>.*))?$")) as {$event, $secs, $matcher}
             | .hooks[$event] += [
-                ({hooks: [{type: "command", timeout: 5,
+                ({hooks: [{type: "command", timeout: (($secs // "5") | tonumber),
                            command: "\($bin) hook \($agent) \($event)"}]}
                  + (if $matcher then {matcher: $matcher} else {} end))
               ])
@@ -64,10 +66,11 @@ install_codex() {
     local config="$HOME/.codex/config.toml"
     merge_hooks "$HOME/.codex/hooks.json" codex "$CODEX_EVENTS"
     ((REMOVE)) && return 0
-    if ! awk '/^\[/{s=$0} s=="[features]" && /^[[:space:]]*hooks[[:space:]]*=[[:space:]]*true/{f=1} END{exit !f}' \
+    if awk '/^\[/{s=$0} s=="[features]" && /^[[:space:]]*hooks[[:space:]]*=[[:space:]]*false/{f=1} END{exit !f}' \
         "$config" 2>/dev/null; then
-        echo "tmux-agent: add 'hooks = true' under [features] in $config to enable Codex hooks" >&2
+        echo "tmux-agent: hooks are disabled in $config ([features] hooks = false)" >&2
     fi
+    echo "tmux-agent: Codex asks you to review and trust new hooks: open /hooks in Codex"
 }
 
 install_opencode() {

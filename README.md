@@ -29,8 +29,9 @@ you look at it.
   preview. Enter switches to that pane, in any session. It can also approve,
   deny, reply to and diff an agent without leaving the popup (see
   [Picker keys](#picker-keys)).
-- **Jump** (`prefix + A`): straight to the next blocked agent, then to
-  finished ones you have not looked at. Press again to cycle through them.
+- **Jump** (`prefix + A`): straight to the next blocked agent, then ones in
+  error, then finished ones you have not looked at. Press again to cycle
+  through them.
 - **Notifications** when an agent you are not looking at gets blocked,
   hits an error or finishes: desktop, in your terminal, or through a command
   of your own such as a phone push. Click a desktop one to jump to that pane,
@@ -94,11 +95,20 @@ the plugin:
 | Agent       | What it changes                                                   |
 |-------------|-------------------------------------------------------------------|
 | Claude Code | merges hook entries into `~/.claude/settings.json`                |
-| Codex       | merges hook entries into `~/.codex/hooks.json`; needs `hooks = true` under `[features]` in `~/.codex/config.toml` |
+| Codex       | merges hook entries into `~/.codex/hooks.json`; warns only if `[features] hooks = false` in `~/.codex/config.toml` |
 | OpenCode    | links `~/.config/opencode/plugins/tmux-agent` to this plugin      |
 
 Re-running replaces earlier tmux-agent entries and leaves your other hooks
 alone. `install-hooks --remove` takes them out again.
+
+Codex enables hooks by default. After `install-hooks codex`, Codex asks you
+to review and trust the new hooks: open `/hooks` in Codex. Codex also
+reports `Interrupt`, so an interrupted turn reads ready. If you installed
+Codex hooks earlier, re-run `install-hooks codex` and trust them again.
+
+OpenCode panes that show several sessions follow all of them: blocked if any
+asks, error if any failed, working while any runs, ready when all are done.
+A failed run shows as error.
 
 Claude Code hooks now include `StopFailure`, which reports the `error` state.
 If you installed hooks earlier, re-run `install-hooks claude` after updating.
@@ -127,7 +137,7 @@ from `install-hooks`.
 | Key      | Action |
 |----------|--------|
 | enter    | switch to the pane |
-| ctrl-y   | approve: sends the agent's approve key (claude `1`, codex `y`), only while it is still blocked; refused otherwise |
+| ctrl-y   | approve: sends the agent's approve key (claude `1`, codex `y`); refused if the agent moved on, or if a new request replaced the one you saw |
 | ctrl-n   | deny, or interrupt a working agent: sends Esc (claude, codex, opencode) |
 | ctrl-e   | type a reply and send it with Enter |
 | ctrl-s   | mark the agent seen |
@@ -210,6 +220,8 @@ keeps `--data-urlencode` safe.
 Agents running in tmux on other machines appear next to local ones, named
 `agent@host`: in the strip, in the picker (with a live preview) and for
 `prefix + A`. When one gets blocked or finishes, you get a notification.
+Marking seen, `detail` and `wait` work for them too, with `<host-key>/<pane>`
+ids (`tmux-agent status --remote` shows them).
 
 ```tmux
 set -g @tmux-agent-remotes 'devbox gpu-box'   # ssh aliases to always ask
@@ -333,13 +345,16 @@ tmux-agent status [--json] [--remote]   list agent panes and states;
 tmux-agent status --porcelain  this host's agents, for other hosts to fetch
 tmux-agent remotes             remote hosts and their last fetch
 tmux-agent attach --next       jump to the most urgent agent pane
-tmux-agent attach --urgent [--from %3]   next blocked/ready pane, after %3
+tmux-agent attach --urgent [--from %3]   next blocked, error, then ready pane,
+                               after %3
 tmux-agent focus --pane %3     switch a client to %3 and raise its terminal
 tmux-agent send --pane %3 (--key K | --text T)... [--expect-state blocked]
                                type into an agent pane; exits 3 without
                                typing unless it is in that state
 tmux-agent mobile              tap-friendly agent list for a phone terminal
 tmux-agent detail --pane %3    why the agent stopped, as its hook reported
+tmux-agent doctor              check the install; exits 1 on any FAIL
+tmux-agent explain --pane %3   why %3 shows its state
 tmux-agent diff --pane %3      git diff of the pane's directory
 tmux-agent wait --pane %3 --state ready [--timeout 600]
 tmux-agent window-dot @1       rollup state dot, for window-status-format
@@ -347,6 +362,30 @@ tmux-agent pane-label %3       agent + state, for pane-border-format
 ```
 
 Run `tmux-agent` with no arguments for the full list.
+
+## Troubleshooting
+
+Run `tmux-agent doctor`. It checks the tools and their versions, the state
+directory, the Claude Code, Codex and OpenCode hooks (missing or stale
+entries, Codex's `config.toml` and trust), the notification setup and the
+remote hosts. Each line is `OK`, `WARN`, `FAIL` or `INFO`; it exits 1 if any
+is `FAIL`.
+
+When a pane shows the wrong state, run `tmux-agent explain --pane %3` (ids
+from `status`; `<host-key>/%3` for a remote one). It prints the agent found,
+the hook report and its age, the stored detail, the cached state, when you
+last saw it, and what the heuristics (pane output and CPU) conclude, then the
+final state and whether it came from the hook report or the heuristics.
+
+## State location
+
+State is kept per tmux server in a private directory (mode 0700, owned by
+you): `$XDG_RUNTIME_DIR/tmux-agent-<uid>/<server>`, or
+`${TMPDIR:-/tmp}/tmux-agent-<uid>/<server>` without `XDG_RUNTIME_DIR`. If
+that parent is not a private directory of yours, it falls back to
+`${XDG_CACHE_HOME:-~/.cache}/tmux-agent/<server>`. `TMUX_AGENT_STATE_DIR`
+overrides all of this. Earlier versions shared one `/tmp/tmux-agent-<uid>`
+between servers, readable by other users; you can delete it.
 
 ## Uninstall
 
@@ -357,7 +396,7 @@ Run `tmux-agent` with no arguments for the full list.
 ## Development
 
 ```sh
-shellcheck bin/tmux-agent lib/engine.sh lib/remote.sh lib/notify.sh lib/pick.sh lib/install-hooks lib/raise tmux-agentic.tmux
+shellcheck bin/tmux-agent lib/engine.sh lib/remote.sh lib/notify.sh lib/pick.sh lib/doctor.sh lib/install-hooks lib/raise tmux-agentic.tmux
 pytest tests
 ```
 

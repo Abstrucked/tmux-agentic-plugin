@@ -84,7 +84,7 @@ class PickTests(unittest.TestCase):
         rows = self.rows()
         self.assertEqual(len(rows), 2)
         first = rows[0].split("\t")
-        self.assertEqual(first[1:], ["%1", "claude"])
+        self.assertEqual(first[1:], ["%1", "claude", str(self.now)])
         self.assertIn("\x1b[2m", first[0])
         self.assertTrue(first[0].endswith("\x1b[0m"))
         detail = first[0].split("\x1b[2m")[1][:-len("\x1b[0m")]
@@ -94,7 +94,7 @@ class PickTests(unittest.TestCase):
         # No detail file: no dim column.
         second = rows[1].split("\t")
         self.assertNotIn("\x1b[2m", second[0])
-        self.assertEqual(second[1:], ["%2", "codex"])
+        self.assertEqual(second[1:], ["%2", "codex", ""])
 
     def test_remote_rows_have_no_detail_and_a_bare_agent_field(self):
         self.remote()
@@ -104,7 +104,7 @@ class PickTests(unittest.TestCase):
         self.fzf()
         self.pick()
         rows = [r.split("\t") for r in self.rows()]
-        self.assertEqual(rows[0][1:], [f"{KEY}/%3", "claude"])
+        self.assertEqual(rows[0][1:], [f"{KEY}/%3", "claude", ""])
         self.assertIn("claude@devbox", ANSI.sub("", rows[0][0]))
         self.assertNotIn("\x1b[2m", rows[0][0])
         self.assertNotIn("nope", rows[0][0])
@@ -124,7 +124,7 @@ class PickTests(unittest.TestCase):
         self.assertEqual(sorted(b[:6] for b in binds),
                          ["ctrl-d", "ctrl-e", "ctrl-l", "ctrl-n", "ctrl-s", "ctrl-y"])
         by_key = {b[:6]: b for b in binds}
-        self.assertIn("pick-action approve {2} {3}", by_key["ctrl-y"])
+        self.assertIn("pick-action approve {2} {3} {4}", by_key["ctrl-y"])
         self.assertIn("pick-action deny {2} {3}", by_key["ctrl-n"])
         self.assertIn("pick-action reply {2} {3}", by_key["ctrl-e"])
         self.assertIn("pick-action seen {2} {3}", by_key["ctrl-s"])
@@ -249,11 +249,59 @@ class PickTests(unittest.TestCase):
         r, calls, _ = self.action("reply", "%2", "claude", tty_input="\n")
         self.assertEqual(len(calls), 1)
 
-    def test_seen_skips_remote_panes(self):
+    def test_approve_passes_the_epoch_only_when_present(self):
+        _, calls, _ = self.action("approve", "%1", "claude", "1234")
+        self.assertEqual(
+            calls, ["send --pane %1 --expect-state blocked --expect-epoch 1234 --key 1"])
+        _, calls, _ = self.action("approve", "%1", "claude", "")
+        self.assertEqual(calls[1:], ["send --pane %1 --expect-state blocked --key 1"])
+
+    def test_seen_forwards_remote_panes(self):
         _, calls, _ = self.action("seen", "%1", "claude")
         self.assertEqual(calls, ["seen %1"])
         _, calls, _ = self.action("seen", f"{KEY}/%3", "claude")
-        self.assertEqual(calls, ["seen %1"])
+        self.assertEqual(calls, ["seen %1", f"seen {KEY}/%3"])
+
+    def test_remote_preview_shows_the_detail_line(self):
+        _, calls, _ = self.action("preview", f"{KEY}/%3", "claude")
+        self.assertEqual(calls[0], f"detail --pane {KEY}/%3")
+
+    def listen(self, fzf_version, help_text):
+        """Run fzf_listen_start/stop; returns the shell's report and curl's argv log."""
+        self.fzf(version=fzf_version, help_text=help_text)
+        curl_log = self.dir / "curl.log"
+        (self.fake / "curl").write_text(
+            f'#!/bin/sh\nprintf "%s\\n" "$*" >>{shlex.quote(str(curl_log))}\ncat >/dev/null\n')
+        script = (f'. "{ENGINE}"; . "{PICK}"; fzf_listen_start "reload(x)"; '
+                  'echo "ARGS=${FZF_LISTEN_ARGS[*]}"; echo "N=${#FZF_LISTEN_ARGS[@]}"; echo "KEY=${FZF_API_KEY:-}"; '
+                  'echo "TICKER=$FZF_LISTEN_TICKER"; '
+                  '[ -z "$FZF_LISTEN_TICKER" ] || { kill -0 "$FZF_LISTEN_TICKER" && echo ALIVE; }; '
+                  'sleep 2.5; p=$FZF_LISTEN_TICKER; fzf_listen_stop; echo "AFTER=$FZF_LISTEN_TICKER"; '
+                  '[ -z "$p" ] || { sleep 0.2; kill -0 "$p" 2>/dev/null && echo STILL || echo DEAD; }')
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                           env=self.env, timeout=20)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
+        return r.stdout, out, curl_log
+
+    def test_fzf_listen_start_and_stop(self):
+        stdout, out, curl_log = self.listen("0.74.4 (test)", "--listen")
+        self.assertRegex(out["ARGS"], r"^--listen=\d+$")
+        self.assertRegex(out["KEY"], r"^[0-9a-f]{32}$")
+        self.assertIn("ALIVE", stdout)
+        self.assertIn("DEAD", stdout)
+        self.assertEqual(out["AFTER"], "")
+        logged = curl_log.read_text()
+        self.assertIn("-XPOST", logged)
+        self.assertNotIn(out["KEY"], logged)
+
+    def test_fzf_listen_start_with_old_fzf_does_nothing(self):
+        stdout, out, curl_log = self.listen("0.39.0", "--listen")
+        self.assertEqual(out["ARGS"], "")
+        self.assertEqual(out["KEY"], "")
+        self.assertEqual(out["TICKER"], "")
+        self.assertNotIn("ALIVE", stdout)
+        self.assertFalse(curl_log.exists())
 
     def test_ctrl_d_toggles_the_preview_between_pane_and_diff(self):
         _, calls, _ = self.action("preview", "%1", "claude")
