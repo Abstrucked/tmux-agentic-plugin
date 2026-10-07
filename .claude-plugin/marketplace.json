@@ -10,7 +10,7 @@
       "name": "tmux-agentic-plugin",
       "source": "./",
       "description": "Reports Claude Code session state to the tmux agent strip, picker and notifications.",
-      "version": "0.2.0"
+      "version": "0.3.0"
     }
   ]
 }
