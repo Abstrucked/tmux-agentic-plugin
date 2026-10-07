@@ -159,6 +159,18 @@ A refused or failed action shows its reason in the header (fzf 0.40+).
 
 `@tmux-agent-notify off` silences everything too.
 
+**Desktop notifications** use `normal` urgency, so their colours come from your
+notification daemon's theme (to restyle them, match `app-name tmux-agent` in
+your dunst, mako, swaync or awesome rules). Set `@tmux-agent-notify-urgency
+critical` to send blocked and error agents as `critical`: most daemons then
+show them in red and keep them until dismissed. `@tmux-agent-notify-timeout`
+(seconds) overrides how long they stay; empty uses the daemon's default.
+A notification closes by itself when you look at the agent (focusing its
+pane, jumping to it, or answering it so its state moves on), and a new one for
+the same agent replaces the open one. This needs `notify-send` 0.8+ and
+`gdbus`, `busctl` or `dbus-send`; the macOS and terminal methods and the notify
+command cannot be closed.
+
 **Terminal notifications** work over ssh and on macOS, with no display. The
 plugin writes an escape sequence straight to each tmux client's terminal, so
 no tmux passthrough setting is needed. The sequence is chosen from the
@@ -321,6 +333,8 @@ window is one of its ancestors.
 | `@tmux-agent-strip-max`       | `4`           | agents shown by name before switching to counts |
 | `@tmux-agent-notify`          | `on`          | notifications; `off` to silence all |
 | `@tmux-agent-notify-method`   | `auto`        | `auto`, `desktop`, `terminal` or `off` (see [Notifications](#notifications)) |
+| `@tmux-agent-notify-urgency`  | `normal`      | desktop urgency for blocked and error agents; `critical` is red and sticky in most daemons |
+| `@tmux-agent-notify-timeout`  | empty         | seconds a desktop notification stays; empty is the daemon's default |
 | `@tmux-agent-osc`             | from `TERM`   | force the terminal notification sequence: `9`, `777` or `99` |
 | `@tmux-agent-notify-command`  | empty         | command run on every notification, with `TA_*` variables; for phone push |
 | `@tmux-agent-raise-command`   | detected      | raises the terminal window when a notification is clicked; a command (gets the client PID) or `off` |

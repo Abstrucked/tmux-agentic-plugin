@@ -156,11 +156,13 @@ pane_in_view() {
 mark_seen() {
     mkdir -p "$TA_STATE_DIR"
     now >"$TA_STATE_DIR/seen-$1"
+    notify_dismiss "$1"
 }
 
 cmd_seen() {
     # $1 pane id, or "<key>/<pane>" for a remote agent.
     if [[ $1 == */* ]]; then
+        notify_dismiss "$1"
         ta_remote_ssh "${1%%/*}" seen "${1#*/}" >/dev/null 2>&1 || true
         return 0
     fi
@@ -302,6 +304,9 @@ scan() {
             { [[ $state == blocked || $state == ready || $state == error ]]; } &&
             ! pane_in_view "$pane"; then
             notify "$agent" "$state" "$target" "$path" "$pane"
+        elif [[ -n $prev && $state != "$prev" ]]; then
+            # The notified state is over (answered, recovered): close it.
+            notify_dismiss "$pane"
         fi
     done < <(tmux list-panes -a -F "$TA_PANE_FMT" 2>/dev/null || true)
 
@@ -309,6 +314,14 @@ scan() {
         [[ -e $f ]] || continue
         base=${f##*-}
         [[ -n ${live[$base]:-} ]] || rm -f "$f"
+    done
+    # Notification ids of panes that are gone (remote ones contain "_").
+    for f in "$TA_STATE_DIR"/notif-%*; do
+        [[ -e $f ]] || continue
+        base=${f##*notif-}
+        if [[ $base =~ ^%[0-9]+$ && -z ${live[$base]:-} ]]; then
+            notify_dismiss "$base"
+        fi
     done
 }
 
@@ -756,6 +769,7 @@ goto_pane() {
     local pane=$1 wid
     local -a client=()
     if [[ $pane == */* ]]; then
+        notify_dismiss "$pane"
         goto_remote "$@"
         return
     fi

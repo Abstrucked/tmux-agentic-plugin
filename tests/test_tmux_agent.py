@@ -538,7 +538,7 @@ class NotifyClickTests(unittest.TestCase):
         self.assertEqual(self.raised.read_text(), "4343")
         self.assertTrue((self.dir / "seen-%7").exists())
         sent = self.notified.read_text()
-        self.assertIn("-u critical -A default=Show --wait custom needs input", sent)
+        self.assertIn("-u normal -p -A default=Show --wait custom needs input", sent)
 
     def test_dismissed_notification_does_nothing(self):
         self.refresh(ACTION="")
@@ -559,7 +559,7 @@ class NotifyClickTests(unittest.TestCase):
         self.refresh(NO_WAIT="1")
         self.assertTrue(wait_for(lambda: self.notified.exists()))
         self.assertEqual(self.notified.read_text().splitlines(),
-                         ["-a tmux-agent -u critical custom needs input app · main:1.1"])
+                         ["-a tmux-agent -u normal custom needs input app · main:1.1"])
 
     def test_focus_on_a_closed_pane_does_nothing(self):
         r = subprocess.run(

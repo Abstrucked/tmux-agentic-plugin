@@ -272,17 +272,24 @@ ta_remote_notify() {
     # agents that just became blocked, ready or errored, as the local scan does.
     [[ -z ${TMUX_AGENT_QUIET:-} ]] || return 0
     local st ag pane tgt path prev
-    local -A before=()
+    local -A before=() after=()
     while IFS='|' read -r st _ pane _; do
         [[ -n $pane ]] && before[$pane]=$st
     done <"$3"
     while IFS='|' read -r st ag pane tgt _ _ path; do
+        after[$pane]=1
         prev=${before[$pane]:-}
         [[ -n $prev && $st != "$prev" ]] || continue
-        [[ $st == blocked || $st == ready || $st == error ]] || continue
-        ta_remote_in_view "$1" && continue
-        notify "$ag@$2" "$st" "$tgt" "$path" "$1/$pane"
+        if [[ $st == blocked || $st == ready || $st == error ]] && ! ta_remote_in_view "$1"; then
+            notify "$ag@$2" "$st" "$tgt" "$path" "$1/$pane"
+        else
+            # Its state moved on (or it is in view): close the old notification.
+            notify_dismiss "$1/$pane"
+        fi
     done <"$4"
+    for pane in "${!before[@]}"; do
+        [[ -n ${after[$pane]:-} ]] || notify_dismiss "$1/$pane"
+    done
 }
 
 ta_remote_watching() {
