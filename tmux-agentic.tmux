@@ -7,6 +7,10 @@
 #   @tmux-agent-key             picker key after the prefix (default a, off: none)
 #   @tmux-agent-urgent-key      key after the prefix that jumps to the next
 #                               blocked, then ready agent (default A, off: none)
+#   @tmux-agent-mirror-fit-key  key after the prefix that fits the remote window
+#                               to the current remote pane mirror (default off;
+#                               F is free unless tmux-fzf or tmux-fingers use
+#                               it)
 #   @tmux-agent-popup-size      picker popup width and height (default 80%)
 #   @tmux-agent-strip-position  interpolate (default): replace #{agent_status}
 #                               in status-left/status-right; centre: centre
@@ -68,9 +72,10 @@ main() {
         tmux display-message "tmux-agentic-plugin needs bash 4+ (found $BASH_VERSION)"
         return 0
     fi
-    local key urgent_key size position max
+    local key urgent_key fit_key size position max
     key=$(option @tmux-agent-key a)
     urgent_key=$(option @tmux-agent-urgent-key A)
+    fit_key=$(option @tmux-agent-mirror-fit-key off)
     size=$(option @tmux-agent-popup-size 80%)
     position=$(option @tmux-agent-strip-position interpolate)
     # Only pass a limit that was set, so TMUX_AGENT_STRIP_MAX still applies.
@@ -83,6 +88,10 @@ main() {
         # A message instead of tmux's "returned 1" when nothing needs you.
         tmux bind-key "$urgent_key" run-shell \
             "'$BIN' attach --urgent --from '#{pane_id}' 2>/dev/null || tmux display-message 'no agent needs you'"
+    fi
+    if [[ $fit_key != off ]]; then
+        tmux bind-key "$fit_key" run-shell \
+            "'$BIN' mirror-fit toggle -t '#{pane_id}' 2>/dev/null || tmux display-message 'not a remote pane mirror'"
     fi
     focus_hook
     case $position in

@@ -53,6 +53,8 @@
 #                        keep one running over ssh)
 #   mirror --pane <key/%N>  interactive remote pane view (internal)
 #   mirror-connect --pane <%N>  SSH control-mode endpoint (internal)
+#   mirror-fit [on|off|toggle] [-t <pane>]
+#                        fit the remote window to this mirror's size
 #
 # Remote agents: hosts in @tmux-agent-remotes, plus live ssh ControlMaster
 # connections, are asked over ssh for their agents (lib/remote.sh). They
@@ -1207,6 +1209,7 @@ main() {
     watch) cmd_watch ;;
     mirror) cmd_mirror "$@" ;;
     mirror-connect) cmd_mirror_connect "$@" ;;
+    mirror-fit) cmd_mirror_fit "$@" ;;
     mirror-transport) cmd_mirror_transport "${1:-}" ;;
     *)
         usage

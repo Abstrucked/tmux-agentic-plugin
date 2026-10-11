@@ -73,7 +73,7 @@ class InputTests(unittest.TestCase):
         self.events = []
         def callback(kind):
             return lambda *args: self.events.append((kind, args))
-        self.parser = bridge.Input(*(callback(kind) for kind in ('key', 'raw', 'paste', 'pan', 'mouse')))
+        self.parser = bridge.Input(*(callback(kind) for kind in ('key', 'raw', 'paste', 'pan', 'mouse', 'fit')))
 
     def test_partial_keys_unicode_and_literal_ctrl_bracket(self):
         self.parser.feed(b'\x1b[')
@@ -97,6 +97,11 @@ class InputTests(unittest.TestCase):
         self.parser.discard()
         self.parser.feed(b'A')
         self.assertEqual(self.events[-1], ('raw', (b'A',)))
+
+    def test_fit_chord_and_other_chords(self):
+        self.parser.feed(b'\x1df\x1d\x1d\x1dx\x1d0\x1df')
+        self.assertEqual(self.events, [('fit', ()), ('raw', (b'\x1d',)), ('raw', (b'\x1d' b'x',)),
+                                       ('pan', ('follow',)), ('fit', ())])
 
     def test_escape_key_timeout(self):
         self.parser.feed(b'\x1b')
@@ -173,6 +178,29 @@ class RealMirrorTests(unittest.TestCase):
         except (OSError, ValueError):
             return False
 
+    def fit_state(self):
+        try:
+            return json.loads(self.status.read_text())['fit']
+        except (OSError, ValueError, KeyError):
+            return None
+
+    def window_info(self, fmt):
+        return self.run_tmux('display-message', '-p', '-t', self.pane, fmt).strip()
+
+    def marker(self):
+        return self.run_tmux('show-options', '-wqv', '-t', self.pane, '@tmux-agent-fit').strip()
+
+    def window_size(self):
+        return self.run_tmux('show-options', '-wqv', '-t', self.pane, 'window-size').strip()
+
+    def is_fitted(self, cols=50, rows=10):
+        return self.window_info('#{window_zoomed_flag}|#{window_width}x#{window_height}|'
+                                '#{pane_width}x#{pane_height}') == '1|%dx%d|%dx%d' % (cols, rows, cols, rows)
+
+    def assert_restored(self):
+        self.assertEqual(self.layout(), self.before)
+        self.assertEqual(self.marker(), '')
+
     def test_interactive_snapshot_preserves_layout_resize_and_close(self):
         self.wait_for(self.connected)
         text = 'MIRROR_HELLOé界'
@@ -188,6 +216,76 @@ class RealMirrorTests(unittest.TestCase):
         self.assertEqual(self.process.returncode, 0)
         self.assertEqual(termios.tcgetattr(self.slave), self.saved)
         self.assertEqual(self.layout(), self.before)
+
+    def test_chord_fits_then_restores_exactly(self):
+        self.wait_for(self.connected)
+        os.write(self.master, b'\x1df')
+        self.wait_for(self.is_fitted)
+        self.assertNotEqual(self.marker(), '')
+        self.wait_for(lambda: self.fit_state() is True)
+        os.write(self.master, b'\x1df')
+        self.wait_for(lambda: self.marker() == '')
+        self.assert_restored()
+        self.assertEqual(self.window_size(), '')
+        self.wait_for(lambda: self.fit_state() is False)
+
+    def test_local_resize_while_fitted_resizes_remote_window(self):
+        self.wait_for(self.connected)
+        os.write(self.master, b'\x1df')
+        self.wait_for(self.is_fitted)
+        fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack('HHHH', 14, 60, 0, 0))
+        self.process.send_signal(signal.SIGWINCH)
+        self.wait_for(lambda: self.is_fitted(60, 14))
+
+    def test_sigterm_while_fitted_restores_layout(self):
+        self.wait_for(self.connected)
+        os.write(self.master, b'\x1df')
+        self.wait_for(self.is_fitted)
+        self.stop()
+        self.assertEqual(self.process.returncode, 0)
+        self.assertEqual(termios.tcgetattr(self.slave), self.saved)
+        self.assert_restored()
+
+    def test_signals_toggle_fit_and_status_file(self):
+        self.wait_for(self.connected)
+        self.process.send_signal(signal.SIGUSR1)
+        self.wait_for(self.is_fitted)
+        self.wait_for(lambda: self.fit_state() is True)
+        self.process.send_signal(signal.SIGUSR2)
+        self.wait_for(lambda: self.marker() == '' and self.fit_state() is False)
+        self.assert_restored()
+
+    def test_existing_window_size_and_other_active_pane_are_restored(self):
+        other = self.run_tmux('list-panes', '-t', self.pane, '-F', '#{pane_id}').split()[1]
+        self.run_tmux('set-option', '-w', '-t', self.pane, 'window-size', 'largest')
+        self.run_tmux('select-pane', '-t', other)
+        self.before = self.layout()
+        self.wait_for(self.connected)
+        os.write(self.master, b'\x1df')
+        self.wait_for(self.is_fitted)
+        self.assertEqual(self.window_size(), 'manual')
+        os.write(self.master, b'\x1df')
+        self.wait_for(lambda: self.marker() == '')
+        self.assert_restored()
+        self.assertEqual(self.window_size(), 'largest')
+        self.assertEqual(self.run_tmux('display-message', '-p', '-t', self.pane.split('%')[0] + other,
+                                       '#{pane_id}').strip(), other)
+
+    def test_start_adopts_a_window_left_fitted(self):
+        self.wait_for(self.connected)
+        os.write(self.master, b'\x1df')
+        self.wait_for(self.is_fitted)
+        # Simulate a crashed bridge: kill it without the restore.
+        self.process.send_signal(signal.SIGKILL)
+        self.process.wait(timeout=5)
+        self.assertNotEqual(self.marker(), '')
+        self.status.unlink()
+        self.process = subprocess.Popen(self.process.args, stdin=self.slave, stdout=self.slave,
+                                        stderr=subprocess.PIPE, env=self.env)
+        self.wait_for(lambda: self.connected() and self.fit_state() is True)
+        os.write(self.master, b'\x1df')
+        self.wait_for(lambda: self.marker() == '')
+        self.assert_restored()
 
     def test_paste_uses_literal_input_and_removes_its_buffer(self):
         self.wait_for(self.connected)

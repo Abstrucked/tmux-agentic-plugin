@@ -849,6 +849,7 @@ class EntryPointTests(unittest.TestCase):
         calls = self.run_entry({
             "show-option -gqv @tmux-agent-key": "off",
             "show-option -gqv @tmux-agent-urgent-key": "off",
+            "show-option -gqv @tmux-agent-mirror-fit-key": "off",
             "show-option -gqv @tmux-agent-strip-position": "centre",
             "show-option -gqv @tmux-agent-strip-max": "6",
             "show -gv status-format[0]": "L#[nolist align=right R",
@@ -856,6 +857,24 @@ class EntryPointTests(unittest.TestCase):
         self.assertFalse([c for c in calls if c.startswith("bind-key")])
         self.assertIn(f"set -g status-format[0] L#[nolist align=absolute-centre]"
                       f"#('{CLI}' strip --max 6)#[nolist align=right R", calls)
+
+    def test_mirror_fit_key_is_configurable(self):
+        calls = self.run_entry({"show-option -gqv @tmux-agent-mirror-fit-key": "M-f"})
+        self.assertTrue([c for c in calls if c.startswith("bind-key M-f run-shell")])
+        self.assertFalse([c for c in calls if c.startswith("bind-key F ")])
+
+    def test_mirror_fit_key_binds_toggle(self):
+        calls = self.run_entry({"show-option -gqv @tmux-agent-mirror-fit-key": "F"})
+        self.assertIn(f"bind-key F run-shell '{CLI}' mirror-fit toggle -t '#{{pane_id}}'"
+                      " 2>/dev/null || tmux display-message 'not a remote pane mirror'", calls)
+
+    def test_mirror_fit_key_defaults_to_unbound(self):
+        calls = self.run_entry()
+        self.assertFalse([c for c in calls if c.startswith("bind-key") and "mirror-fit" in c])
+
+    def test_mirror_fit_key_off_binds_nothing(self):
+        calls = self.run_entry({"show-option -gqv @tmux-agent-mirror-fit-key": "off"})
+        self.assertFalse([c for c in calls if c.startswith("bind-key") and "mirror-fit" in c])
 
     def test_focus_hook_is_not_added_twice(self):
         calls = self.run_entry({

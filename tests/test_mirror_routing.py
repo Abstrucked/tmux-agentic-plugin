@@ -1,8 +1,11 @@
 """Routing regressions for remote tmux pane mirrors."""
 
 from pathlib import Path
+import os
 import shlex
+import shutil
 import subprocess
+import tempfile
 import time
 import unittest
 
@@ -262,3 +265,124 @@ class MirrorRoutingTests(RemoteTestSupport, unittest.TestCase):
         r = self.cli("mirror", "--pane", f"{self.KEY}/%3")
         self.assertEqual(r.returncode, 1)
         self.assertIn("Python 3.9+", r.stderr)
+
+
+@unittest.skipUnless(shutil.which("tmux"), "tmux not installed")
+class MirrorFitTests(unittest.TestCase):
+    """mirror-fit against a real tmux on a private socket and a fake bridge."""
+
+    BRIDGE = (
+        "import signal, sys, time\n"
+        "log = sys.argv[1]\n"
+        "def note(name):\n"
+        "    def handler(*_):\n"
+        "        with open(log, 'a') as f:\n"
+        "            f.write(name + '\\n')\n"
+        "    return handler\n"
+        "signal.signal(signal.SIGUSR1, note('USR1'))\n"
+        "signal.signal(signal.SIGUSR2, note('USR2'))\n"
+        "open(log + '.ready', 'w').close()\n"
+        "while True:\n"
+        "    time.sleep(0.05)\n"
+    )
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="ta-fit-"))
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.state = self.dir / "state"
+        self.state.mkdir()
+        self.bin = self.dir / "bin"
+        self.bin.mkdir()
+        self.signals = self.dir / "signals"
+        sockdir = Path(tempfile.mkdtemp(prefix="ta-", dir="/tmp"))
+        self.addCleanup(shutil.rmtree, sockdir, ignore_errors=True)
+        self.sock = sockdir / "sock"
+        real = shutil.which("tmux")
+        wrapper = self.bin / "tmux"
+        wrapper.write_text(f'#!/bin/sh\nexec {shlex.quote(real)} -S {shlex.quote(str(self.sock))} "$@"\n')
+        wrapper.chmod(0o755)
+        self.env = {
+            **{k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")},
+            "PATH": f"{self.bin}:{os.environ['PATH']}",
+            "TMUX_AGENT_STATE_DIR": str(self.state),
+            "TMUX_AGENT_QUIET": "1",
+        }
+        self.addCleanup(self.tmux, "kill-server")
+        (self.dir / "remote-pane.py").write_text(self.BRIDGE)
+
+    def tmux(self, *args):
+        return subprocess.run(["tmux", *args], capture_output=True, text=True, env=self.env)
+
+    def new_pane(self, *command, mirror=True):
+        r = self.tmux("new-session", "-d", "-P", "-F", "#{pane_id}", "-x", "80", "-y", "24",
+                      *command)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        pane = r.stdout.strip()
+        if mirror:
+            self.tmux("set-option", "-p", "-t", pane, "@tmux-agent-mirror", "on")
+        return pane
+
+    def bridge_pane(self, **kw):
+        pane = self.new_pane("python3", str(self.dir / "remote-pane.py"), str(self.signals), **kw)
+        wait_for(lambda: Path(f"{self.signals}.ready").exists())
+        return pane
+
+    def fit(self, *args):
+        return subprocess.run([str(CLI), "mirror-fit", *args], capture_output=True, text=True,
+                              env=self.env, timeout=20)
+
+    def received(self, count):
+        wait_for(lambda: self.signals.exists() and len(self.signals.read_text().split()) >= count)
+        return self.signals.read_text().split()
+
+    def assert_no_signal(self):
+        time.sleep(0.3)
+        self.assertFalse(self.signals.exists())
+
+    def test_on_sends_usr1_and_off_sends_usr2(self):
+        pane = self.bridge_pane()
+        self.assertEqual(self.fit("on", "-t", pane).returncode, 0)
+        self.assertEqual(self.received(1), ["USR1"])
+        self.assertEqual(self.fit("off", "-t", pane).returncode, 0)
+        self.assertEqual(self.received(2), ["USR1", "USR2"])
+
+    def test_toggle_follows_the_status_file(self):
+        pane = self.bridge_pane()
+        status = self.state / f"mirror-{pane}.status"
+        status.write_text('{"fit": false, "connected": true}\n')
+        self.assertEqual(self.fit("toggle", "-t", pane).returncode, 0)
+        self.assertEqual(self.received(1), ["USR1"])
+        status.write_text('{"fit": true, "connected": true}\n')
+        self.assertEqual(self.fit("-t", pane).returncode, 0)
+        self.assertEqual(self.received(2), ["USR1", "USR2"])
+
+    def test_toggle_without_a_status_file_turns_fit_on(self):
+        pane = self.bridge_pane()
+        self.assertEqual(self.fit("toggle", "-t", pane).returncode, 0)
+        self.assertEqual(self.received(1), ["USR1"])
+
+    def test_default_pane_is_tmux_pane(self):
+        pane = self.bridge_pane()
+        r = subprocess.run([str(CLI), "mirror-fit", "on"], capture_output=True, text=True,
+                           env={**self.env, "TMUX_PANE": pane}, timeout=20)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.received(1), ["USR1"])
+
+    def test_unmarked_pane_is_refused(self):
+        pane = self.bridge_pane(mirror=False)
+        r = self.fit("on", "-t", pane)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not a remote pane mirror", r.stderr)
+        self.assert_no_signal()
+
+    def test_marked_pane_running_something_else_is_refused(self):
+        pane = self.new_pane("sleep", "300")
+        r = self.fit("on", "-t", pane)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not a remote pane mirror", r.stderr)
+
+    def test_bad_action_or_pane_id_is_a_usage_error(self):
+        pane = self.bridge_pane()
+        self.assertEqual(self.fit("sideways", "-t", pane).returncode, 2)
+        self.assertEqual(self.fit("on", "-t", "main").returncode, 2)
+        self.assert_no_signal()

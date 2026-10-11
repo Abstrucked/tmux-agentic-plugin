@@ -273,9 +273,21 @@ stops its bridge; it does not stop the remote pane or agent.
 
 In the mirror, `Ctrl-]` followed by an arrow pans the view, `Ctrl-]` then
 PageUp/PageDown scrolls history, and `Ctrl-]` then `0` returns to cursor-follow
-mode. Press `Ctrl-]` twice to send a literal `Ctrl-]` to the remote pane. The local
+mode. `Ctrl-]` then `f` toggles fit (below). Press `Ctrl-]` twice to send a literal
+`Ctrl-]` to the remote pane. The local
 `tmux-agent mirror --pane <host-key>/<pane>` and remote
 `tmux-agent mirror-connect --pane <pane>` commands implement this bridge.
+
+Fit makes the remote pane match the mirror: it zooms the agent's pane if its
+window is split, resizes the remote window to the mirror's size, and follows
+local resizes, such as a phone attaching, while on. Toggle it with `Ctrl-]`
+then `f`, `tmux-agent mirror-fit [on|off|toggle]`, or a prefix key you set with
+`@tmux-agent-mirror-fit-key` (none by default). It changes the
+remote window for every client attached to it until turned off. Turning it off,
+or closing the mirror, restores the window's size, zoom, layout and active pane.
+The original state is kept on the remote window, so a mirror opened after a
+crash starts fitted and toggling off restores it. Fit needs nothing new on the
+remote host.
 
 The default `@tmux-agent-remote-view mirror` needs Python 3.9+ locally and the
 updated plugin on both hosts. To use the previous nested-tmux attach behavior,
@@ -351,6 +363,7 @@ window is one of its ancestors.
 |-------------------------------|---------------|--------|
 | `@tmux-agent-key`             | `a`           | picker key after the prefix; `off` for none |
 | `@tmux-agent-urgent-key`      | `A`           | jump key after the prefix; `off` for none |
+| `@tmux-agent-mirror-fit-key`  | `off`         | key after the prefix that toggles fit for the current mirror, e.g. `F` |
 | `@tmux-agent-popup-size`      | `80%`         | picker popup width and height |
 | `@tmux-agent-strip-position`  | `interpolate` | `interpolate`: replace `#{agent_status}` in `status-left`/`status-right`; `centre`: put the strip in the middle of the status bar; `off`: no strip |
 | `@tmux-agent-strip-max`       | `4`           | agents shown by name before switching to counts |
@@ -389,6 +402,8 @@ tmux-agent focus --pane %3     switch a client to %3 and raise its terminal
 tmux-agent send --pane %3 (--key K | --text T)... [--expect-state blocked]
                                type into an agent pane; exits 3 without
                                typing unless it is in that state
+tmux-agent mirror-fit [on|off|toggle] [-t %3]
+                               fit a remote pane mirror's window to the mirror
 tmux-agent mobile              tap-friendly agent list for a phone terminal
 tmux-agent detail --pane %3    why the agent stopped, as its hook reported
 tmux-agent doctor              check the install; exits 1 on any FAIL

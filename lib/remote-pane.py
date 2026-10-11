@@ -31,6 +31,11 @@ META = ("#{pane_width}|#{pane_height}|#{cursor_x}|#{cursor_y}|#{cursor_flag}|"
 BLOCK = re.compile(rb"^%(begin|end|error) ([0-9]+) ([0-9]+) ([0-9]+)$")
 SGR = re.compile(r"\x1b\[[0-9;:]*m")
 OCTAL = re.compile(rb"\\([0-7]{3})")
+WINDOW = ("#{window_id}|#{window_width}|#{window_height}|#{window_zoomed_flag}|"
+          "#{window_panes}|#{window_layout}|#{pane_id}|#{pane_active}")
+WINDOW_ROW = re.compile(r"^(@[0-9]+)\|([0-9]+)\|([0-9]+)\|([01])\|([0-9]+)\|"
+                        r"([0-9a-f]{4},[0-9x,{}\[\]]+)\|(%[0-9]+)\|([01])$")
+SAVED = re.compile(r"^([0-9]+)\|([0-9]+)\|([01])\|(%[0-9]+)\|([0-9a-f]{4},[0-9x,{}\[\]]+)\|([a-z]*)$")
 MAX_BLOCK = 8 * 1024 * 1024
 KEYS = {
     b"\x1b[A": "Up", b"\x1b[B": "Down", b"\x1b[C": "Right", b"\x1b[D": "Left",
@@ -177,8 +182,9 @@ class Protocol:
 
 class Input:
     """Incremental input parser; pasted escape sequences remain literal."""
-    def __init__(self, key, raw, paste, pan, mouse):
+    def __init__(self, key, raw, paste, pan, mouse, fit=lambda: None):
         self.key, self.raw, self.paste, self.pan, self.mouse = key, raw, paste, pan, mouse
+        self.fit = fit
         self.buffer = b''
         self.pasting = False
         self.pasted = bytearray()
@@ -235,6 +241,8 @@ class Input:
                     self.raw(byte)
                 elif byte == b'0':
                     self.pan('follow')
+                elif byte == b'f':
+                    self.fit()
                 else:
                     self.raw(b'\x1d' + byte)
             elif byte == b'\x1d':
@@ -306,9 +314,16 @@ class Mirror:
         self.write_buffer = bytearray()
         self.raw_input = bytearray()
         self.buffer_name = 'tmux-agent-mirror-%s' % os.getpid()
-        self.input = Input(self.key, self.raw, self.paste, self.pan, self.mouse)
+        self.state, self.reason = 'connecting', ''
+        # None until the user asks or an already fitted window is adopted.
+        self.fit = None
+        self.fit_signal = None
+        self.fit_work = False
+        self.fit_busy = False
+        self.resized = False
+        self.input = Input(self.key, self.raw, self.paste, self.pan, self.mouse, self.fit_toggle)
 
-    def status(self, state, reason=''):
+    def write_status(self):
         # No screen contents, input or full subprocess command is recorded.
         if self.args.status_file:
             temporary = None
@@ -316,7 +331,7 @@ class Mirror:
                 path = Path(self.args.status_file)
                 fd, temporary = tempfile.mkstemp(prefix='.mirror-status-', dir=str(path.parent))
                 with os.fdopen(fd, 'w') as stream:
-                    json.dump({'state': state, 'reason': reason[:1024]}, stream)
+                    json.dump({'state': self.state, 'reason': self.reason[:1024], 'fit': bool(self.fit)}, stream)
                 os.replace(temporary, path)
             except OSError:
                 pass
@@ -326,6 +341,10 @@ class Mirror:
                         os.unlink(temporary)
                     except FileNotFoundError:
                         pass
+
+    def status(self, state, reason=''):
+        self.state, self.reason = state, reason
+        self.write_status()
         if state != 'connected':
             width, height = self.terminal.dimensions()
             label = crop('%s%s' % (state, ': ' + reason if reason else ''), 0, width)
@@ -342,14 +361,14 @@ class Mirror:
         os.set_blocking(self.process.stdin.fileno(), False)
         self.protocol = Protocol(self.send, self.output)
         self.started = time.monotonic()
-        self.ready = self.busy = False
+        self.ready = self.busy = self.fit_busy = False
         self.dirty = True
         self.buffers = {'out': b'', 'err': b''}
         self.last_meta = self.last_frame = 0
         self.status('connecting')
 
     def disconnect(self):
-        self.ready = self.busy = False
+        self.ready = self.busy = self.fit_busy = False
         self.input.discard()
         self.raw_input.clear()
         self.write_buffer.clear()
@@ -424,6 +443,124 @@ class Mirror:
             self.x += {'Left': -8, 'Right': 8}.get(action, 0)
             self.y += {'Up': -1, 'Down': 1, 'PPage': -(height - 1), 'NPage': height - 1}.get(action, 0)
         self.dirty = True
+
+    def fit_toggle(self):
+        self.set_fit(not self.fit)
+
+    def set_fit(self, value):
+        if value != self.fit:
+            self.fit = value
+            self.write_status()
+        self.fit_work = True
+
+    def fit_sync(self):
+        """Query the pane's window, then fit or restore it as desired.
+
+        Every command here is best effort: a vanished window must not tear
+        the mirror down, the metadata poll reports a closed pane itself."""
+        self.fit_busy = True
+        self.fit_work = False
+        self.protocol.command('list-panes -t %s -F %s' % (self.args.pane, quote(WINDOW)), self.fit_window)
+
+    def fit_skip(self, *_):
+        # Best effort: an %error here must not reach Protocol's fatal path.
+        pass
+
+    def fit_end(self, *_):
+        self.fit_busy = False
+
+    def fit_window(self, ok, lines):
+        rows = [WINDOW_ROW.match(line.decode('utf-8', 'replace')) for line in lines] if ok else []
+        if not rows or not all(rows):
+            self.fit_busy = False
+            return
+        active = next((row for row in rows if row[8] == '1'), rows[0])
+        info = {'window': rows[0][1], 'width': rows[0][2], 'height': rows[0][3], 'zoomed': rows[0][4] == '1',
+                'panes': int(rows[0][5]), 'layout': rows[0][6], 'active': active[7], 'size': ''}
+        def size(ok, lines):
+            value = lines[0].decode('utf-8', 'replace') if ok and lines else ''
+            info['size'] = value if re.fullmatch(r'[a-z]+', value) else ''
+        # Window level only, so an inherited global value is not mistaken for one.
+        self.protocol.command('show-options -wqv -t %s window-size' % info['window'], size)
+        self.protocol.command('show-options -wqv -t %s @tmux-agent-fit' % info['window'],
+                              lambda ok, lines: self.fit_decide(info, lines[0].decode('utf-8', 'replace') if ok and lines else ''))
+
+    def fit_decide(self, info, marker):
+        if self.fit is None and marker:
+            # A window left fitted (crashed bridge, other mirror): own the undo.
+            self.fit = True
+            self.write_status()
+        if self.fit:
+            self.fit_apply(info, marker)
+        elif marker:
+            self.fit_restore(info['window'], marker)
+        else:
+            self.fit_busy = False
+
+    def fit_apply(self, info, marker):
+        window, pane, command = info['window'], self.args.pane, self.protocol.command
+        if not marker:
+            saved = '|'.join((info['width'], info['height'], '1' if info['zoomed'] else '0',
+                              info['active'], info['layout'], info['size']))
+            command('set-option -w -t %s @tmux-agent-fit %s' % (window, quote(saved)), self.fit_skip)
+        if info['panes'] > 1 and not (info['zoomed'] and info['active'] == pane):
+            # resize-pane -Z toggles whatever is zoomed, so undo another pane first.
+            if info['zoomed']:
+                command('resize-pane -Z -t %s' % pane, self.fit_skip)
+            command('resize-pane -Z -t %s' % pane, self.fit_skip)
+        cols, rows = self.terminal.dimensions()
+        command('resize-window -t %s -x %d -y %d' % (window, cols, rows), self.fit_end)
+
+    def fit_restore(self, window, marker):
+        saved = SAVED.match(marker)
+        command = self.protocol.command
+        if not saved:
+            command('set-option -wu -t %s @tmux-agent-fit' % window, self.fit_end)
+            return
+        width, height, zoomed, active, layout, size = saved.groups()
+        command('resize-window -t %s -x %s -y %s' % (window, width, height), self.fit_skip)
+        def after(ok, lines):
+            rows = [line.decode('utf-8', 'replace').split('|') for line in lines] if ok else []
+            now = bool(rows) and rows[0][0] == '1'
+            panes = [row[-1] for row in rows]
+            if now and zoomed == '0':
+                command('resize-pane -Z -t %s' % panes[0], self.fit_skip)
+            # Fails if the pane count changed meanwhile; the size is still back.
+            command('select-layout -t %s %s' % (window, quote(layout)), self.fit_skip)
+            if active in panes:
+                command('select-pane -t %s' % active, self.fit_skip)
+                if zoomed == '1':
+                    command('resize-pane -Z -t %s' % active, self.fit_skip)
+            if size:
+                command('set-option -w -t %s window-size %s' % (window, size), self.fit_skip)
+            else:
+                command('set-option -wu -t %s window-size' % window, self.fit_skip)
+            command('set-option -wu -t %s @tmux-agent-fit' % window, self.fit_end)
+        command('list-panes -t %s -F %s' % (window, quote('#{window_zoomed_flag}|#{pane_id}')), after)
+
+    def leave(self):
+        """Undo a fit before exiting, waiting briefly for tmux to confirm."""
+        if not (self.ready and self.process and self.fit):
+            return
+        try:
+            self.selector.unregister(0)
+        except (KeyError, ValueError):
+            pass
+        deadline = time.monotonic() + 2
+        self.fit = False
+        self.write_status()
+        started = False
+        try:
+            while time.monotonic() < deadline:
+                if not self.fit_busy:
+                    if started:
+                        return
+                    started = True
+                    self.fit_sync()
+                for event, _ in self.selector.select(0.05):
+                    self.service(event)
+        except (Closed, ConnectionError, OSError):
+            pass
 
     def mouse(self, button, x, y, release):
         if not self.ready or not self.meta or self.meta['mode']:
@@ -514,7 +651,7 @@ class Mirror:
             text = crop(self.rows[index], self.origin[0], width) if index < min(rows, len(self.rows)) else ''
             if index == height - 1 and rows < height:
                 label = ('remote pane in tmux copy mode; input paused' if self.meta['mode'] else
-                         'view %d,%d · Ctrl-] arrows/PageUp/PageDown · 0 follow' % self.origin)
+                         'view %d,%d · Ctrl-] arrows/PageUp/PageDown · 0 follow · f fit' % self.origin)
                 text = crop(label, 0, width)
             out.append('\x1b[%d;1H\x1b[0m\x1b[2K%s\x1b[0m' % (index + 1, text))
         cx, cy = self.meta['cx'] - self.origin[0], self.meta['cy'] - self.origin[1]
@@ -556,11 +693,21 @@ class Mirror:
                     self.ready = True
                     self.session = None
                     self.meta = None
+                    self.fit_work = True
                     self.status('connected')
                 else:
                     raise Unsupported('remote mirror endpoint unavailable; update the remote plugin or use @tmux-agent-remote-view attach')
             else:
                 self.protocol.line(line)
+
+    def service(self, event):
+        if event.data == 'write':
+            written = os.write(event.fileobj.fileno(), self.write_buffer)
+            del self.write_buffer[:written]
+            if not self.write_buffer:
+                self.selector.unregister(event.fileobj)
+        else:
+            self.read(event.data, event.fileobj)
 
     def run(self):
         try:
@@ -569,6 +716,12 @@ class Mirror:
                 try:
                     if self.process is None and now >= self.next_try:
                         self.connect()
+                    if self.fit_signal is not None:
+                        value, self.fit_signal = self.fit_signal, None
+                        self.set_fit(value)
+                    if self.resized:
+                        self.resized = False
+                        self.fit_work = self.fit_work or bool(self.fit)
                     for event, _ in self.selector.select(0.05):
                         if event.data == 'input':
                             data = os.read(0, 65536)
@@ -576,17 +729,14 @@ class Mirror:
                                 self.stopping = True
                             elif self.ready:
                                 self.input.feed(data)
-                        elif event.data == 'write':
-                            written = os.write(event.fileobj.fileno(), self.write_buffer)
-                            del self.write_buffer[:written]
-                            if not self.write_buffer:
-                                self.selector.unregister(event.fileobj)
                         else:
-                            self.read(event.data, event.fileobj)
+                            self.service(event)
                     if self.ready:
                         if self.input.buffer and now - self.input.since > 0.04:
                             self.input.feed(expired=True)
                         self.flush_input()
+                        if self.meta and self.fit_work and not self.fit_busy:
+                            self.fit_sync()
                         if not self.busy and len(self.protocol.pending) < 8 and (
                                 self.dirty and now - self.last_frame >= 0.1 or now - self.last_meta >= 1):
                             self.request()
@@ -601,6 +751,7 @@ class Mirror:
                     self.retry += 1
                     self.next_try = time.monotonic() + delay
                     self.status('disconnected', '%s; retry in %ss' % (reason, delay))
+            self.leave()
         except (Closed, Unsupported, ValueError) as error:
             self.final_message = str(error)
             self.status('closed' if isinstance(error, Closed) else 'error', self.final_message)
@@ -627,10 +778,16 @@ def main():
         def stop(_signum, _frame):
             mirror.stopping = True
         def resized(_signum, _frame):
-            mirror.dirty = True
+            mirror.dirty = mirror.resized = True
+        def fit(on):
+            def handler(_signum, _frame):
+                mirror.fit_signal = on
+            return handler
         for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
             signal.signal(sig, stop)
         signal.signal(signal.SIGWINCH, resized)
+        signal.signal(signal.SIGUSR1, fit(True))
+        signal.signal(signal.SIGUSR2, fit(False))
         result = mirror.run()
     if mirror.final_message:
         print(mirror.final_message)

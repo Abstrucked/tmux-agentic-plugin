@@ -145,3 +145,40 @@ cmd_mirror_transport() {
         -o ServerAliveCountMax=3 -T "$TA_REMOTE_DEST" \
         "$(ta_remote_command mirror-connect --pane "$pane")"
 }
+
+cmd_mirror_fit() {
+    local action=toggle pane=${TMUX_PANE:-} marker dead pid cmd fit=false status sig
+    while (($#)); do
+        case $1 in
+        on | off | toggle) action=$1; shift ;;
+        -t)
+            [[ -n ${2:-} ]] || { echo 'mirror-fit: -t needs a pane' >&2; return 2; }
+            pane=$2; shift 2
+            ;;
+        *) echo 'usage: mirror-fit [on|off|toggle] [-t <pane>]' >&2; return 2 ;;
+        esac
+    done
+    [[ -n $pane ]] || pane=$(tmux display-message -p '#{pane_id}' 2>/dev/null || true)
+    [[ $pane =~ ^%[0-9]+$ ]] || { echo 'mirror-fit: invalid pane id' >&2; return 2; }
+    IFS='|' read -r marker dead pid < <(tmux display-message -p -t "$pane" \
+        '#{@tmux-agent-mirror}|#{pane_dead}|#{pane_pid}' 2>/dev/null || true) || true
+    if [[ $marker != on || $dead != 0 || ! $pid =~ ^[0-9]+$ ]]; then
+        echo 'not a remote pane mirror' >&2
+        return 1
+    fi
+    # Never signal a pid that is not the bridge.
+    cmd=$(ps -o command= -p "$pid" 2>/dev/null || true)
+    if [[ $cmd != *remote-pane.py* ]]; then
+        echo 'not a remote pane mirror' >&2
+        return 1
+    fi
+    if [[ $action == toggle ]]; then
+        status=$TA_STATE_DIR/mirror-$pane.status
+        if [[ -f $status ]] && grep -Eq '"fit"[[:space:]]*:[[:space:]]*true' "$status" 2>/dev/null; then
+            fit=true
+        fi
+        [[ $fit == true ]] && action=off || action=on
+    fi
+    [[ $action == on ]] && sig=USR1 || sig=USR2
+    kill -"$sig" "$pid" 2>/dev/null || { echo 'mirror-fit: could not signal the bridge' >&2; return 1; }
+}

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Remote pane mirrors can fit the remote window to the mirror's size with
+  `Ctrl-]` then `f` or `tmux-agent mirror-fit`; a prefix key can be bound
+  with `@tmux-agent-mirror-fit-key` (none by default). Turning fit off or
+  closing the mirror restores the remote window's size, zoom and layout.
 - Remote agent jumps now open live pane mirrors in the local `remote-agents`
   session, preserving the remote pane's layout, size and process. Mirrors use
   a persistent SSH control-mode bridge, retry disconnects without replaying
