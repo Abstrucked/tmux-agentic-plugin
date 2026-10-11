@@ -25,8 +25,8 @@
 #   @tmux-agent-remote-discover also ask hosts with a live ssh ControlMaster
 #                               connection, on (default) or off
 #   @tmux-agent-remote-tailscale also ask every online Linux/macOS peer of the
-#                               tailnet (needs tailscale and jq), on (default)
-#                               or off
+#                               tailnet (needs tailscale and jq), off (default)
+#                               or on
 #   @tmux-agent-remote-watch    keep a "tmux-agent watch" running over ssh to each
 #                               host that has one, for updates within a second
 #                               instead of every interval, on (default) or off

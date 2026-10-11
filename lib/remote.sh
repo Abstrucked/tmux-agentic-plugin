@@ -7,14 +7,19 @@
 # and ssh keys are the only credentials. Hosts are the ssh aliases in
 # @tmux-agent-remotes plus, with @tmux-agent-remote-discover on (the
 # default), every live ssh ControlMaster connection, so a machine you are
-# connected to shows up by itself. With @tmux-agent-remote-tailscale on (the
-# default) every online Linux/macOS peer of the tailnet is asked too, so
-# nothing needs listing: hosts that run no tmux-agent drop out as "noplugin"
-# and are only retried now and then. Files in $TA_STATE_DIR:
-#   remotes            key|name|socket|destination|port, one line per host
+# connected to shows up by itself. With @tmux-agent-remote-tailscale on (off
+# by default) every online Linux/macOS peer of the tailnet is asked too, so
+# nothing needs listing: hosts that run no tmux-agent drop out as
+# "noplugin" and are only retried now and then. Files in $TA_STATE_DIR:
+#   remotes            key|name|socket|destination|port|hostname, one line
+#                      per host; hostname (optional) is the address to dial
+#                      for a tailnet peer, passed as -o HostName=
 #   remote-<key>       the host's last answer, one agent per line:
 #                      state|agent|pane|target|window|age|path
-#   remote-<key>.meta  ok|err|noplugin, then when it was fetched
+#   remote-<key>.meta  ok|err|noplugin, when it was fetched, and how many
+#                      fetches in a row failed (err only; 0 otherwise, and
+#                      absent in older files). A failing host is retried
+#                      with backoff, up to every 30 minutes.
 #   remote.stamp       when the last fetch round started
 #   remote-<key>.pid   pid of the host's watcher, a long-lived "tmux-agent
 #                      watch" over ssh that keeps remote-<key> current
@@ -68,7 +73,7 @@ ta_remote_enabled() {
     # True when there are hosts to list or connections to discover.
     [[ -n $(ta_opt TMUX_AGENT_REMOTES @tmux-agent-remotes '') ]] ||
         [[ $(ta_opt TMUX_AGENT_REMOTE_DISCOVER @tmux-agent-remote-discover on) == on ]] ||
-        [[ $(ta_opt TMUX_AGENT_REMOTE_TAILSCALE @tmux-agent-remote-tailscale on) == on ]]
+        [[ $(ta_opt TMUX_AGENT_REMOTE_TAILSCALE @tmux-agent-remote-tailscale off) == on ]]
 }
 
 ta_is_self() {
@@ -90,7 +95,7 @@ ta_tailscale_peers() {
     # $TA_STATE_DIR/tailscale-known-hosts from the peers' ssh host keys, so
     # ssh can check them by their tailnet address without anyone having run
     # "tailscale configure ssh".
-    [[ $(ta_opt TMUX_AGENT_REMOTE_TAILSCALE @tmux-agent-remote-tailscale on) == on ]] || return 0
+    [[ $(ta_opt TMUX_AGENT_REMOTE_TAILSCALE @tmux-agent-remote-tailscale off) == on ]] || return 0
     command -v tailscale >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 0
     local json known=$TA_STATE_DIR/tailscale-known-hosts
     local -a limit=()
@@ -114,7 +119,7 @@ ta_tailscale_peers() {
 }
 
 ta_remote_hosts() {
-    # key|name|socket|destination|port for every host to ask: listed
+    # key|name|socket|destination|port|hostname for every host to ask: listed
     # aliases first, then live ControlMaster connections not already
     # listed, then online tailnet peers. Socket names have to follow the ControlPath pattern
     # <prefix>%r@%h:%p (dotfiles: ~/.ssh/master-%r@%h:%p); the glob comes
@@ -171,14 +176,26 @@ ta_remote_hosts() {
     # Tailnet peers last: a live connection to one is already listed above
     # and keeps riding its socket. The key uses the peer's short name, which
     # is what ssh -G and a ControlPath give for a name resolved by MagicDNS.
-    user=$(id -un)
+    # The destination is the bare name so that a "Host <name>" block in
+    # ~/.ssh/config applies; the tailnet address is only dialled (HostName)
+    # when the config does not say where the name lives.
     while IFS=$'\t' read -r name ip; do
         [[ -n $name ]] || continue
         ta_is_self "$name" && continue
-        key="$user@$name:22"
+        host='' user='' port=''
+        while read -r k v; do
+            case $k in
+            hostname) host=$v ;;
+            user) user=$v ;;
+            port) port=$v ;;
+            esac
+        done < <(ssh -G "$name" 2>/dev/null || true)
+        user=${user:-$(id -un)} port=${port:-22}
+        key="$user@$name:$port"
         [[ -z ${have[$key]:-} ]] || continue
         have[$key]=1
-        printf '%s|%s||%s@%s|22\n' "$key" "$name" "$user" "${ip:-$name}"
+        [[ -z $host || ${host,,} == "${name,,}" ]] || ip=''
+        printf '%s|%s||%s||%s\n' "$key" "$name" "$name" "$ip"
     done <<<"$peers"
 }
 
@@ -200,14 +217,15 @@ ta_remote_known_hosts() {
 ta_remote_target() {
     # $1 key. Sets TA_REMOTE_ARGV (ssh and its options), TA_REMOTE_DEST and
     # TA_REMOTE_NAME from the host list; fails for an unknown key.
-    local k name sock dest port
+    local k name sock dest port hostname
     [[ -f $TA_STATE_DIR/remotes ]] || return 1
-    while IFS='|' read -r k name sock dest port; do
+    while IFS='|' read -r k name sock dest port hostname; do
         [[ $k == "$1" ]] || continue
         TA_REMOTE_ARGV=(ssh -o ConnectTimeout=3)
         # Ride the live connection: no new login, and no second master.
         [[ -z $sock ]] || TA_REMOTE_ARGV+=(-S "$sock" -o ControlMaster=no)
         [[ -z $port ]] || TA_REMOTE_ARGV+=(-p "$port")
+        [[ -z $hostname ]] || TA_REMOTE_ARGV+=(-o "HostName=$hostname")
         ta_remote_known_hosts "${dest#*@}" || true
         # shellcheck disable=SC2034 # read by bin/tmux-agent
         TA_REMOTE_DEST=$dest TA_REMOTE_NAME=$name
@@ -249,9 +267,9 @@ ta_remote_ssh_stream() {
 ta_remote_fresh() {
     # $1 key. True when its last fetch worked and is recent enough to trust:
     # an open connection does not mean the data is current.
-    local st epoch meta=$TA_STATE_DIR/remote-$1.meta
+    local st epoch _ meta=$TA_STATE_DIR/remote-$1.meta
     [[ -f $meta ]] || return 1
-    IFS='|' read -r st epoch <"$meta" || return 1
+    IFS='|' read -r st epoch _ <"$meta" || return 1
     [[ $st == ok && $epoch =~ ^[0-9]+$ ]] || return 1
     (($(date +%s) - epoch <= 6 * $(ta_remote_interval)))
 }
@@ -320,14 +338,22 @@ ta_remote_due() {
     # that failed wait a while, so that offline peers and machines that
     # will never run tmux-agent (every tailnet peer is asked) do not cost
     # an ssh login each round.
-    local st epoch age meta=$TA_STATE_DIR/remote-$1.meta
+    local st epoch failures wait_s age meta=$TA_STATE_DIR/remote-$1.meta
     [[ -f $meta ]] || return 0
-    IFS='|' read -r st epoch <"$meta" || return 0
+    IFS='|' read -r st epoch failures <"$meta" || return 0
     [[ $epoch =~ ^[0-9]+$ ]] || return 0
     age=$(($(date +%s) - epoch))
     case $st in
     noplugin) ((age >= 300)) ;;
-    err) ((age >= 6 * $(ta_remote_interval))) ;;
+    err)
+        # Doubles with every failure in a row, up to 30 minutes. An old
+        # two-field meta counts as one failure.
+        [[ $failures =~ ^[0-9]+$ ]] && ((failures > 0)) || failures=1
+        ((failures > 12)) && failures=12
+        wait_s=$((6 * $(ta_remote_interval) * (1 << (failures - 1))))
+        ((wait_s > 1800)) && wait_s=1800
+        ((age >= wait_s))
+        ;;
     ok)
         ta_remote_watching "$1" || return 0
         # A heartbeat arrives every 5s; a silent watcher is hung.
@@ -349,7 +375,7 @@ ta_remote_watch() {
             printf '%s' "$frame" >"$out.tmp"
             [[ ! -f $out ]] || ta_remote_notify "$1" "$2" "$out" "$out.tmp"
             mv "$out.tmp" "$out"
-            printf 'ok|%s\n' "$(date +%s)" >"$out.meta"
+            printf 'ok|%s|0\n' "$(date +%s)" >"$out.meta"
             frame=''
         else
             frame+="$line"$'\n'
@@ -383,7 +409,7 @@ ta_remote_watch_start() {
 
 ta_remote_fetch() {
     # $1 key, $2 host name. Ask the host for its agents and cache the answer.
-    local out=$TA_STATE_DIR/remote-$1 rc=0 st=ok
+    local out=$TA_STATE_DIR/remote-$1 rc=0 st=ok failures=0 pst pfail _
     ta_remote_due "$1" || return 0
     ta_remote_ssh "$1" status --porcelain >"$out.tmp" 2>/dev/null || rc=$?
     case $rc in
@@ -397,7 +423,14 @@ ta_remote_fetch() {
     else
         rm -f "$out.tmp"
     fi
-    printf '%s|%s\n' "$st" "$(date +%s)" >"$out.meta"
+    if [[ $st == err ]]; then
+        failures=1
+        if [[ -f $out.meta ]] && IFS='|' read -r pst _ pfail <"$out.meta" && [[ $pst == err ]]; then
+            [[ $pfail =~ ^[0-9]+$ ]] || pfail=1
+            ((pfail < 1000)) && failures=$((pfail + 1))
+        fi
+    fi
+    printf '%s|%s|%s\n' "$st" "$(date +%s)" "$failures" >"$out.meta"
     [[ $st != ok ]] || ta_remote_watch_start "$1" "$2"
 }
 
@@ -471,7 +504,7 @@ ta_remote_agents() {
         if [[ ! -f $f ]] || ! ta_remote_fresh "$k"; then
             continue
         fi
-        IFS='|' read -r _ fetched <"$f.meta"
+        IFS='|' read -r _ fetched _ <"$f.meta"
         while IFS='|' read -r st ag pane tgt _ age path; do
             [[ -n $pane && $age =~ ^[0-9]+$ ]] || continue
             printf '%s|%s|%s|%s|%s|%s|%s\n' \

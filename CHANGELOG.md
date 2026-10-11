@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Remote discovery is gentler. Asking every tailnet peer is now opt-in:
+  `@tmux-agent-remote-tailscale` defaults to `off`; set it to `on` to keep the
+  old behaviour. Tailnet peers are now dialled by name, so `Host` blocks in
+  `~/.ssh/config` (User, IdentityFile, Port) apply, and the tailnet address
+  is used only when the config does not redirect the name. Hosts that keep
+  failing are retried with backoff, doubling from every minute up to every 30
+  minutes, instead of every minute forever; `tmux-agent remotes` shows the
+  failure count.
 - Remote pane mirrors can fit the remote window to the mirror's size with
   `Ctrl-]` then `f` or `tmux-agent mirror-fit`; a prefix key can be bound
   with `@tmux-agent-mirror-fit-key` (none by default). Turning fit off or

@@ -176,7 +176,7 @@ doc_remotes() {
         st=pending
         meta=$TA_STATE_DIR/remote-$k.meta
         if [[ -f $meta ]]; then
-            IFS='|' read -r st _ <"$meta" || true
+            IFS='|' read -r st _ _ <"$meta" || true
         fi
         case $st in err | noplugin) bad+=("$name ($st)") ;; esac
     done <"$TA_STATE_DIR/remotes"

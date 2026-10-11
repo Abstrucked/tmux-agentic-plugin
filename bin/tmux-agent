@@ -1107,19 +1107,20 @@ cmd_remotes() {
     # One line per host: name, key, how it was found, last fetch and age,
     # agent count.
     refresh
-    local k name sock st epoch n meta
+    local k name sock st epoch failures n meta note
     [[ -f $TA_STATE_DIR/remotes ]] || cmd_remote_refresh
     [[ -f $TA_STATE_DIR/remotes ]] || return 0
     while IFS='|' read -r k name sock _; do
         [[ -n $k ]] || continue
-        st=pending epoch=$(now) n=0
+        st=pending epoch=$(now) failures='' n=0 note=''
         meta=$TA_STATE_DIR/remote-$k.meta
-        [[ -f $meta ]] && IFS='|' read -r st epoch <"$meta"
+        [[ -f $meta ]] && IFS='|' read -r st epoch failures <"$meta"
+        [[ $st == noplugin ]] && note=' (install tmux-agentic-plugin there)'
+        [[ $st == err && $failures =~ ^[0-9]+$ ]] && ((failures > 1)) && note=" ($failures failures)"
         [[ -f $TA_STATE_DIR/remote-$k ]] && n=$(grep -c . "$TA_STATE_DIR/remote-$k" || true)
         printf '%s\t%s\t%s\t%s %s ago\t%s agents%s\n' "$name" "$k" \
             "$([[ -n $sock ]] && echo connected || echo listed)" \
-            "$st" "$(age_str "$(($(now) - epoch))")" "$n" \
-            "$([[ $st == noplugin ]] && echo ' (install tmux-agentic-plugin there)')"
+            "$st" "$(age_str "$(($(now) - epoch))")" "$n" "$note"
     done <"$TA_STATE_DIR/remotes"
 }
 

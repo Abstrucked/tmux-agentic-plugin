@@ -1153,25 +1153,27 @@ class RemoteTests(RemoteTestSupport, unittest.TestCase):
             ("devbox", "100.64.0.11", "linux", True, []),        # already listed
             (os.uname().nodename.split(".")[0].lower(), "100.64.0.12", "linux", True, []))
         (self.fake / "G-devbox").write_text(f"hostname 100.64.0.11\nuser {me}\nport 22\n")
-        self.answer(f"{me}@100.64.0.7", "ready|codex|%4|w:1.1|@3|5|/src/ml\n")
+        for peer in ("gpu", "mac"):
+            (self.fake / f"G-{peer}").write_text(f"hostname {peer}\nuser {me}\nport 22\n")
+        self.answer("gpu", "ready|codex|%4|w:1.1|@3|5|/src/ml\n")
         self.fetch(TMUX_AGENT_REMOTE_TAILSCALE="on")
         self.assertEqual((self.state / "remotes").read_text().splitlines(), [
             f"{me}@devbox:22|devbox||devbox|",   # key by peer name
-            f"{me}@gpu:22|gpu||{me}@100.64.0.7|22",
-            f"{me}@mac:22|mac||{me}@100.64.0.8|22",
+            f"{me}@gpu:22|gpu||gpu||100.64.0.7",
+            f"{me}@mac:22|mac||mac||100.64.0.8",
         ])
         known = self.state / "tailscale-known-hosts"
         self.assertEqual(known.read_text(), "100.64.0.7,gpu ssh-ed25519 AAAAkey\n")
-        gpu = [c for c in self.ssh_calls() if "--porcelain" in c and "gpu" not in c
-               and f"{me}@100.64.0.7" in c]
+        gpu = [c for c in self.ssh_calls() if "--porcelain" in c and "HostName=100.64.0.7" in c]
         self.assertTrue(gpu and f"-o UserKnownHostsFile={known} -o GlobalKnownHostsFile=/dev/null" in gpu[0], gpu)
-        mac = [c for c in self.ssh_calls() if "--porcelain" in c and f"{me}@100.64.0.8" in c]
+        mac = [c for c in self.ssh_calls() if "--porcelain" in c and "HostName=100.64.0.8" in c]
         self.assertTrue(mac and "UserKnownHostsFile" not in mac[0], mac)
         self.assertIn("codex@gpu", self.cli("status", "--remote").stdout)
 
     def test_a_live_connection_to_a_peer_wins_over_tailscale(self):
         me = getpass.getuser()
         self.tailnet(("gpu", "100.64.0.7", "linux", True, []))
+        (self.fake / "G-gpu").write_text(f"hostname gpu\nuser {me}\nport 22\n")
         self.unix_socket(f"master-{me}@gpu:22")
         self.fetch(TMUX_AGENT_REMOTE_TAILSCALE="on", TMUX_AGENT_REMOTE_DISCOVER="on",
                    TMUX_AGENT_REMOTES="")
@@ -1182,6 +1184,7 @@ class RemoteTests(RemoteTestSupport, unittest.TestCase):
     def test_a_peer_reached_by_address_and_by_name_is_one_host(self):
         me = getpass.getuser()
         self.tailnet(("gpu", "100.64.0.7", "linux", True, []))
+        (self.fake / "G-gpu").write_text(f"hostname gpu\nuser {me}\nport 22\n")
         by_ip = self.unix_socket(f"master-{me}@100.64.0.7:22")
         self.unix_socket(f"master-{me}@gpu:22")
         self.fetch(TMUX_AGENT_REMOTE_TAILSCALE="on", TMUX_AGENT_REMOTE_DISCOVER="on",
