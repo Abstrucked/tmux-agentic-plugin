@@ -47,4 +47,6 @@ jobs:
         run: pytest tests
       - name: Tests (unittest, Python 3.9)
         if: matrix.python == '3.9'
-        run: python -m unittest discover -s tests -v
+        # pytest gives tests an empty stdin; unittest must too, or a fake fzf
+        # that reads stdin waits forever.
+        run: python -m unittest discover -s tests -v </dev/null
