@@ -1060,7 +1060,7 @@ cmd_mobile() {
             continue
         fi
         # Refresh the list every 2s through fzf's keyed listen port.
-        fzf_listen_start "$reload"
+        fzf_listen_start 2 "$SELF" mobile-rows
         sel=$(mobile_rows | fzf --ansi --reverse --no-sort --no-scrollbar ${FZF_LISTEN_ARGS[@]+"${FZF_LISTEN_ARGS[@]}"} \
             --delimiter=$'\t' --with-nth=1 --header 'tap an agent' \
             --bind "ctrl-r:$reload" \

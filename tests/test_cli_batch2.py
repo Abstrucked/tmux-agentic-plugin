@@ -444,7 +444,9 @@ class MobileTests(Base):
         curl = self.curl_log.read_text()
         self.assertIn(f"x-api-key: {key}", curl)
         self.assertNotIn(key, curl.split("\n")[0])
-        self.assertIn("reload(", curl)
+        self.assertIn('-d reload-sync(cat "$TA_LIVE_ROWS")', curl)
+        self.assertIn("--track", log)
+        self.assertIn("--id-nth=2", log)
 
     def test_sigterm_stops_the_ticker_and_exits_130(self):
         p = subprocess.Popen([str(CLI), "mobile"], env={**self.env, "FAKE_FZF_SLEEP": "30"},

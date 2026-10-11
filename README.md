@@ -51,7 +51,8 @@ you look at it.
 - bash 4+ (on macOS: `brew install bash`)
 - [fzf](https://github.com/junegunn/fzf) for the picker. Its actions need any
   recent fzf; the error line in the picker header needs 0.40+; the
-  auto-refreshing list needs 0.43+ and curl (otherwise press ctrl-l)
+  auto-refreshing list needs 0.71+ and curl (otherwise press ctrl-l). The
+  cursor stays on the same agent when the list refreshes
 - jq for `install-hooks` and `status --json`. It also lets hooks record why
   an agent stopped (optional; without it everything else works)
 - Linux or macOS. Desktop notifications use `notify-send` or `osascript`;
@@ -285,8 +286,8 @@ name (Tailscale SSH needs no keys), and set its startup command to
 `~/.config/tmux/plugins/tmux-agentic-plugin/bin/tmux-agent mobile` (use
 `~/.tmux/plugins/...` if that is where TPM put it). Turn on mouse support
 so taps select rows. Any host works as the entry point, since each one
-lists the others it can reach. Needs fzf; the list refreshes itself when
-curl is installed too, otherwise Ctrl-R.
+lists the others it can reach. Needs fzf; the list refreshes itself (fzf
+0.71+ and curl, the cursor stays on the same agent), otherwise Ctrl-R.
 
 `send` accepts only agent panes and a short list of keys (Enter, Escape,
 Tab, Space, BSpace, the arrows, Ctrl-C, `y n Y N` and digits); `--text`

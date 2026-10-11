@@ -209,8 +209,8 @@ doc_tools() {
         fz=${fz%% *}
         if ! doc_ver_ge "$fz" 0.40; then
             doc_line WARN fzf "$fz: older than 0.40, the picker header errors"
-        elif ! doc_ver_ge "$fz" 0.43; then
-            doc_line WARN fzf "$fz: no picker auto-reload before 0.43"
+        elif ! doc_ver_ge "$fz" 0.71; then
+            doc_line WARN fzf "$fz: no picker auto-reload before 0.71"
         else
             doc_line OK fzf "$fz"
         fi
