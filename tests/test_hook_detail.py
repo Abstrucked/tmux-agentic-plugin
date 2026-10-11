@@ -391,7 +391,7 @@ class DetailDiffTests(Sandbox):
 
     def git(self, repo, *args):
         subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t",
-                        *args], check=True, capture_output=True)
+                        *args], check=True, capture_output=True, stdin=subprocess.DEVNULL)
 
     def test_diff_shows_changes_and_untracked_files(self):
         repo = self.dir / "repo"

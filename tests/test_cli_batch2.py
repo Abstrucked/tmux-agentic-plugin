@@ -37,7 +37,7 @@ class Base(unittest.TestCase):
 
     def run_cli(self, *args, env=None, **kw):
         return subprocess.run([str(CLI), *args], capture_output=True, text=True,
-                              env=env or self.env, timeout=30, **kw)
+                              env=env or self.env, timeout=30, **kw, stdin=subprocess.DEVNULL)
 
     def write_state(self, pane, state, agent="claude"):
         (self.state / f"state-{pane}").write_text(
@@ -184,7 +184,7 @@ class GuardedSendTests(Base):
         def rule(*a):
             script = (f"eval \"$(sed -n '/^report_authoritative() {{/,/^}}/p' '{CLI}')\"; "
                       f"TA_REPORT_TTL=300; report_authoritative {' '.join(a)}")
-            return subprocess.run(["bash", "-c", script], capture_output=True).returncode
+            return subprocess.run(["bash", "-c", script], capture_output=True, stdin=subprocess.DEVNULL).returncode
         n = self.now
         self.assertEqual(rule("ready", str(n), str(n), "0"), 0)
         self.assertEqual(rule("''", str(n), str(n), "1"), 1)
@@ -312,16 +312,17 @@ class ServerTargetingTests(Base):
         env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
         env.update(TMUX_TMPDIR=str(sockdir), HOME=str(self.dir))
         tmux = ["tmux", "-L", name]
-        self.addCleanup(subprocess.run, [*tmux, "kill-server"], env=env, capture_output=True)
+        self.addCleanup(subprocess.run, [*tmux, "kill-server"], env=env, capture_output=True,
+                        stdin=subprocess.DEVNULL)
         subprocess.run([*tmux, "-f", "/dev/null", "new-session", "-d", "-s", "t"],
-                       env=env, check=True)
+                       env=env, check=True, stdin=subprocess.DEVNULL)
         sock = subprocess.run([*tmux, "display-message", "-p", "#{socket_path}"], env=env,
-                              capture_output=True, text=True, check=True).stdout.strip()
+                              capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL).stdout.strip()
         (self.dir / "tmp").mkdir()
         job_env = {k: v for k, v in env.items() if k not in ("XDG_RUNTIME_DIR", "TMUX_AGENT_STATE_DIR")}
         job_env.update(TMUX_AGENT_QUIET="1", TMPDIR=str(self.dir / "tmp"), TMUX=f"{sock},1,0")
         r = subprocess.run([str(CLI), "refresh"], env=job_env, capture_output=True,
-                           text=True, timeout=60)
+                           text=True, timeout=60, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual([p.name for p in (self.dir / "tmp" / f"tmux-agent-{os.getuid()}").iterdir()],
                          [name])
@@ -449,7 +450,7 @@ class MobileTests(Base):
     def test_sigterm_stops_the_ticker_and_exits_130(self):
         p = subprocess.Popen([str(CLI), "mobile"], env={**self.env, "FAKE_FZF_SLEEP": "30"},
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             start_new_session=True)
+                             start_new_session=True, stdin=subprocess.DEVNULL)
         try:
             deadline = time.time() + 10
             while not self.pid_file.exists() and time.time() < deadline:

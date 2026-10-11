@@ -122,7 +122,7 @@ class RealMirrorTests(unittest.TestCase):
                         TMUX_AGENT_REMOTE_DISCOVER='off', TMUX_AGENT_REMOTE_TAILSCALE='off')
         self.tmux = ['tmux', '-S', str(self.sock)]
         self.run_tmux('-f', '/dev/null', 'new-session', '-d', '-s', 'source', '-x', '80', '-y', '24', 'cat')
-        self.addCleanup(lambda: subprocess.run([*self.tmux, 'kill-server'], env=self.env, capture_output=True))
+        self.addCleanup(lambda: subprocess.run([*self.tmux, 'kill-server'], env=self.env, capture_output=True, stdin=subprocess.DEVNULL))
         self.pane = self.run_tmux('display-message', '-p', '-t', 'source:0', '#{pane_id}').strip()
         self.run_tmux('split-window', '-d', '-t', self.pane, 'cat')
         self.before = self.layout()
@@ -153,7 +153,7 @@ class RealMirrorTests(unittest.TestCase):
         self.process.stderr.close()
 
     def run_tmux(self, *args):
-        result = subprocess.run([*self.tmux, *args], env=self.env, text=True, capture_output=True)
+        result = subprocess.run([*self.tmux, *args], env=self.env, text=True, capture_output=True, stdin=subprocess.DEVNULL)
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout
 
@@ -305,7 +305,7 @@ class RealMirrorTests(unittest.TestCase):
 
     def test_reconnect_discards_input_typed_while_disconnected(self):
         self.wait_for(self.connected)
-        children = subprocess.check_output(['ps', '-axo', 'pid=,ppid='], text=True)
+        children = subprocess.check_output(['ps', '-axo', 'pid=,ppid='], text=True, stdin=subprocess.DEVNULL)
         pid = next(int(line.split()[0]) for line in children.splitlines()
                    if line.split()[1] == str(self.process.pid))
         os.kill(pid, signal.SIGTERM)
@@ -349,8 +349,8 @@ class RealMirrorTests(unittest.TestCase):
         env = {**self.env, 'TMUX_AGENT_STATE_DIR': str(local_state),
                'TMUX_AGENT_REMOTE_VIEW': 'mirror', 'PATH': str(fake) + ':' + self.env['PATH']}
         subprocess.run([*local_tmux, '-f', '/dev/null', 'new-session', '-d', '-s', 'work', 'cat'],
-                       env=env, check=True, capture_output=True)
-        self.addCleanup(lambda: subprocess.run([*local_tmux, 'kill-server'], env=env, capture_output=True))
+                       env=env, check=True, capture_output=True, stdin=subprocess.DEVNULL)
+        self.addCleanup(lambda: subprocess.run([*local_tmux, 'kill-server'], env=env, capture_output=True, stdin=subprocess.DEVNULL))
         env['TMUX'] = str(local_sock) + ',1,0'
         key = 'me@remote:22'
         (local_state / 'remotes').write_text(key + '|remote||remote|\n')
@@ -359,11 +359,11 @@ class RealMirrorTests(unittest.TestCase):
         (local_state / 'stamp').write_text('%d\n' % time.time())
         for _ in range(2):
             result = subprocess.run([str(ROOT / 'bin/tmux-agent'), 'attach', '--next'], env=env,
-                                    capture_output=True, text=True, timeout=10)
+                                    capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
             self.assertEqual(result.returncode, 0, result.stderr)
         rows = subprocess.check_output([*local_tmux, 'list-panes', '-s', '-t', 'remote-agents', '-F',
                                        '#{pane_id}|#{@tmux-agent-mirror}|#{@tmux-agent-remote}|#{@tmux-agent-remote-pane}'],
-                                      env=env, text=True).splitlines()
+                                      env=env, text=True, stdin=subprocess.DEVNULL).splitlines()
         self.assertEqual(len(rows), 1)
         pane, marker, host, remote_pane = rows[0].split('|')
         self.assertEqual((marker, host, remote_pane), ('on', key, self.pane))
@@ -374,7 +374,7 @@ class RealMirrorTests(unittest.TestCase):
             except (OSError, ValueError):
                 return False
         self.wait_for(ready)
-        subprocess.run([*local_tmux, 'kill-pane', '-t', pane], env=env, check=True, capture_output=True)
+        subprocess.run([*local_tmux, 'kill-pane', '-t', pane], env=env, check=True, capture_output=True, stdin=subprocess.DEVNULL)
         self.assertEqual(self.layout(), self.before)
 
 

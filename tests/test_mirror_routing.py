@@ -9,7 +9,7 @@ import tempfile
 import time
 import unittest
 
-from test_tmux_agent import CLI, ROOT, RemoteTestSupport, wait_for
+from test_tmux_agent import CLI, ROOT, RemoteTestSupport, fake_tmux, wait_for
 
 
 class MirrorRoutingTests(RemoteTestSupport, unittest.TestCase):
@@ -145,7 +145,7 @@ class MirrorRoutingTests(RemoteTestSupport, unittest.TestCase):
         log = self.stateful_tmux(self.KEY)
         procs = [subprocess.Popen([str(CLI), "attach", "--next"], cwd=ROOT,
                                   env=self.env, stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE, text=True)
+                                  stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL)
                  for _ in range(2)]
         results = [proc.communicate(timeout=15) + (proc.returncode,) for proc in procs]
         self.assertEqual([rc for _, _, rc in results], [0, 0], results)
@@ -311,7 +311,7 @@ class MirrorFitTests(unittest.TestCase):
         (self.dir / "remote-pane.py").write_text(self.BRIDGE)
 
     def tmux(self, *args):
-        return subprocess.run(["tmux", *args], capture_output=True, text=True, env=self.env)
+        return subprocess.run(["tmux", *args], capture_output=True, text=True, env=self.env, stdin=subprocess.DEVNULL)
 
     def new_pane(self, *command, mirror=True):
         r = self.tmux("new-session", "-d", "-P", "-F", "#{pane_id}", "-x", "80", "-y", "24",
@@ -329,7 +329,7 @@ class MirrorFitTests(unittest.TestCase):
 
     def fit(self, *args):
         return subprocess.run([str(CLI), "mirror-fit", *args], capture_output=True, text=True,
-                              env=self.env, timeout=20)
+                              env=self.env, timeout=20, stdin=subprocess.DEVNULL)
 
     def received(self, count):
         wait_for(lambda: self.signals.exists() and len(self.signals.read_text().split()) >= count)
@@ -364,7 +364,7 @@ class MirrorFitTests(unittest.TestCase):
     def test_default_pane_is_tmux_pane(self):
         pane = self.bridge_pane()
         r = subprocess.run([str(CLI), "mirror-fit", "on"], capture_output=True, text=True,
-                           env={**self.env, "TMUX_PANE": pane}, timeout=20)
+                           env={**self.env, "TMUX_PANE": pane}, timeout=20, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.received(1), ["USR1"])
 
@@ -386,3 +386,29 @@ class MirrorFitTests(unittest.TestCase):
         self.assertEqual(self.fit("sideways", "-t", pane).returncode, 2)
         self.assertEqual(self.fit("on", "-t", "main").returncode, 2)
         self.assert_no_signal()
+
+
+class MirrorStatusSweepTests(unittest.TestCase):
+    """A scan deletes mirror status files of panes that no longer exist."""
+
+    def test_scan_removes_only_stale_mirror_status_files(self):
+        with tempfile.TemporaryDirectory(prefix="ta-sweep-") as directory:
+            state = Path(directory)
+            fake_tmux(directory, {
+                "list-panes -a -F #{pane_id}|#{@tmux-agent-mirror}": "%12|on\n%1|\n",
+                "list-panes -a -F #{pane_id}|#{pane_pid}|#{window_id}|"
+                "#{session_name}:#{window_index}.#{pane_index}|#{pane_current_path}":
+                    "%12|1|@1|remote-agents:1.1|/x\n%1|1|@2|work:1.1|/x\n",
+            })
+            for name in ("mirror-%99.status", "mirror-%12.status",
+                         "mirror-unknown.status", "mirror.lock"):
+                (state / name).write_text("x\n")
+            env = {k: v for k, v in os.environ.items() if k != "TMUX_AGENT_QUIET"}
+            env.update({"TMUX_AGENT_STATE_DIR": directory,
+                        "PATH": f"{directory}:{os.environ['PATH']}"})
+            r = subprocess.run([str(CLI), "refresh", "1"], capture_output=True, text=True,
+                               env=env, stdin=subprocess.DEVNULL, timeout=30)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertFalse((state / "mirror-%99.status").exists())
+            for kept in ("mirror-%12.status", "mirror-unknown.status", "mirror.lock"):
+                self.assertTrue((state / kept).exists(), kept)

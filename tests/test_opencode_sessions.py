@@ -53,7 +53,7 @@ def run_plugin(events, want):
             capture_output=True, text=True, timeout=30,
             env={**os.environ, "PLUGIN_URL": (ROOT / "opencode" / "tui.js").as_uri(),
                  "TMUX_PANE": "%1", "TMUX_AGENT_BIN": str(bin_),
-                 "EVENTS": json.dumps(events), "LOG": str(log), "WANT": str(want)},
+                 "EVENTS": json.dumps(events), "LOG": str(log), "WANT": str(want)}, stdin=subprocess.DEVNULL,
         )
         if r.returncode != 0:
             raise AssertionError(r.stderr)

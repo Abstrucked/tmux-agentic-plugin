@@ -23,7 +23,7 @@ class Base(RemoteTestSupport, unittest.TestCase):
         prelude = (f'set -uo pipefail; TA_STATE_DIR="{self.state}"; SELF=/bin/true; '
                    f'. "{REMOTE}"; ')
         return subprocess.run(["bash", "-c", prelude + script], capture_output=True,
-                              text=True, env={**self.env, **env}, timeout=20)
+                              text=True, env={**self.env, **env}, timeout=20, stdin=subprocess.DEVNULL)
 
     def meta(self, key, text):
         (self.state / f"remote-{key}.meta").write_text(text)

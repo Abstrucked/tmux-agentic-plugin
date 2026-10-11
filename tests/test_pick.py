@@ -63,7 +63,7 @@ class PickTests(unittest.TestCase):
 
     def pick(self):
         r = subprocess.run([str(CLI), "pick"], capture_output=True, text=True,
-                           env=self.env, timeout=20)
+                           env=self.env, timeout=20, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stderr)
         return r
 
@@ -183,7 +183,7 @@ class PickTests(unittest.TestCase):
         (self.fake / "curl").write_text("#!/bin/sh\nexit 1\n")
         (self.fake / "curl").chmod(0o755)
         r = subprocess.run([str(CLI), "pick"], capture_output=True, text=True,
-                           env={**self.env, "TMPDIR": str(self.dir)}, timeout=20)
+                           env={**self.env, "TMPDIR": str(self.dir)}, timeout=20, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 130, r.stderr)
         made = Path((self.dir / "pickdir").read_text().strip())
         self.assertEqual(made.parent, self.dir)
@@ -279,7 +279,7 @@ class PickTests(unittest.TestCase):
                   'sleep 2.5; p=$FZF_LISTEN_TICKER; fzf_listen_stop; echo "AFTER=$FZF_LISTEN_TICKER"; '
                   '[ -z "$p" ] || { sleep 0.2; kill -0 "$p" 2>/dev/null && echo STILL || echo DEAD; }')
         r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                           env=self.env, timeout=20)
+                           env=self.env, timeout=20, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stderr)
         out = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
         return r.stdout, out, curl_log

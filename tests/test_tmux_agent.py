@@ -41,7 +41,7 @@ def bash(script, *args, env=None):
     e = {**os.environ, "TMUX_AGENT_QUIET": "1", **(env or {})}
     return subprocess.run(
         ["bash", "-c", prelude + script, "ta", *args],
-        capture_output=True, text=True, env=e,
+        capture_output=True, text=True, env=e, stdin=subprocess.DEVNULL,
     )
 
 
@@ -210,7 +210,7 @@ class DetectTests(unittest.TestCase):
             proc.wait()
 
     def spawn(self, script):
-        proc = subprocess.Popen(["bash", "-c", script])
+        proc = subprocess.Popen(["bash", "-c", script], stdin=subprocess.DEVNULL)
         self.procs = getattr(self, "procs", [])
         self.procs.append(proc)
         time.sleep(0.2)
@@ -256,7 +256,7 @@ class CliSmokeTests(unittest.TestCase):
     def run_cli(self, *args):
         e = {**os.environ, "TMUX_AGENT_QUIET": "1",
              "TMUX_AGENT_STATE_DIR": tempfile.mkdtemp(prefix="ta-test-")}
-        return subprocess.run([str(CLI), *args], capture_output=True, text=True, env=e)
+        return subprocess.run([str(CLI), *args], capture_output=True, text=True, env=e, stdin=subprocess.DEVNULL)
 
     def test_strip_exits_clean(self):
         r = self.run_cli("strip")
@@ -290,7 +290,7 @@ class CliSmokeTests(unittest.TestCase):
             r = subprocess.run(
                 [str(CLI), "strip", *(["--max", max_] if max_ else [])],
                 capture_output=True, text=True,
-                env={**os.environ, "TMUX_AGENT_STATE_DIR": directory, **env},
+                env={**os.environ, "TMUX_AGENT_STATE_DIR": directory, **env}, stdin=subprocess.DEVNULL,
             )
             self.assertEqual(r.returncode, 0, r.stderr)
             return r.stdout
@@ -338,7 +338,7 @@ class CliSmokeTests(unittest.TestCase):
             })
             r = subprocess.run(
                 [str(CLI), "place-strip", "--max", "6"], capture_output=True, text=True,
-                env={**os.environ, "PATH": f"{directory}:{os.environ['PATH']}"},
+                env={**os.environ, "PATH": f"{directory}:{os.environ['PATH']}"}, stdin=subprocess.DEVNULL,
             )
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn(
@@ -373,12 +373,13 @@ class CliSmokeTests(unittest.TestCase):
                 )
             fake = state_dir / "bin"
             fake.mkdir()
-            (fake / "fzf").write_text(f'#!/bin/sh\ncat >"{state_dir}/rows"\nexit 130\n')
+            (fake / "fzf").write_text(f'#!/bin/sh\ncase "$1" in --version|--help) exit 0;; esac\n'
+                                       f'cat >"{state_dir}/rows"\nexit 130\n')
             (fake / "fzf").chmod(0o755)
             r = subprocess.run(
                 [str(CLI), "pick"], capture_output=True, text=True,
                 env={**os.environ, "TMUX_AGENT_STATE_DIR": directory,
-                     "PATH": f"{fake}:{os.environ['PATH']}"},
+                     "PATH": f"{fake}:{os.environ['PATH']}"}, stdin=subprocess.DEVNULL,
             )
             self.assertEqual(r.returncode, 0, r.stderr)
             raw = (state_dir / "rows").read_text().splitlines()
@@ -411,7 +412,7 @@ class CliSmokeTests(unittest.TestCase):
             r = subprocess.run(
                 [str(CLI), "pick"], capture_output=True, text=True,
                 env={**os.environ, "TMUX_AGENT_STATE_DIR": directory,
-                     "PATH": f"{fake}:{os.environ['PATH']}"},
+                     "PATH": f"{fake}:{os.environ['PATH']}"}, stdin=subprocess.DEVNULL,
             )
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("switch-client -t %5",
@@ -435,7 +436,7 @@ class CliSmokeTests(unittest.TestCase):
             r = subprocess.run(
                 [str(CLI), "attach", *args], capture_output=True, text=True,
                 env={**os.environ, "TMUX_AGENT_STATE_DIR": directory,
-                     "PATH": f"{fake}:{os.environ['PATH']}"},
+                     "PATH": f"{fake}:{os.environ['PATH']}"}, stdin=subprocess.DEVNULL,
             )
             calls = log.read_text().splitlines() if log.exists() else []
             return r, [c.split()[-1] for c in calls if c.startswith("switch-client")]
@@ -524,7 +525,7 @@ class NotifyClickTests(unittest.TestCase):
                   "PATH": f"{self.fake}:{os.environ['PATH']}",
                   "TMUX_AGENT_NOTIFY_METHOD": "desktop", **env})
         return subprocess.run([str(CLI), "refresh", "1"], capture_output=True,
-                              text=True, env=e, timeout=10)
+                              text=True, env=e, timeout=10, stdin=subprocess.DEVNULL)
 
     def switches(self):
         calls = self.log.read_text().splitlines() if self.log.exists() else []
@@ -565,7 +566,7 @@ class NotifyClickTests(unittest.TestCase):
         r = subprocess.run(
             [str(CLI), "focus", "--pane", "%99"], capture_output=True, text=True,
             env={**os.environ, "TMUX_AGENT_STATE_DIR": str(self.dir),
-                 "PATH": f"{self.fake}:{os.environ['PATH']}"},
+                 "PATH": f"{self.fake}:{os.environ['PATH']}"}, stdin=subprocess.DEVNULL,
         )
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.switches(), [])
@@ -599,14 +600,14 @@ class RaiseTests(unittest.TestCase):
         if not (self.fake / "pgrep").exists():
             self.tool("pgrep", "exit 1\n")
         path = f"{self.fake}:{os.environ['PATH']}"
-        client = subprocess.Popen(["sleep", "30"], env={"PATH": path, **client_env})
+        client = subprocess.Popen(["sleep", "30"], env={"PATH": path, **client_env}, stdin=subprocess.DEVNULL)
         self.addCleanup(client.wait)
         self.addCleanup(client.kill)
         base = {k: v for k, v in os.environ.items()
                 if k not in ("HYPRLAND_INSTANCE_SIGNATURE", "SWAYSOCK", "DISPLAY",
                              "WAYLAND_DISPLAY", "TMUX")}
         r = subprocess.run([str(self.RAISE), str(client.pid)], capture_output=True,
-                           text=True, env={**base, "PATH": path, **(env or client_env)})
+                           text=True, env={**base, "PATH": path, **(env or client_env)}, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stderr)
         calls = self.log.read_text().splitlines() if self.log.exists() else []
         # pgrep only probes for awesome; the rest are window-manager calls.
@@ -743,7 +744,7 @@ class HookTests(unittest.TestCase):
         while wait_stamp and not (d / "stamp").exists() and time.time() < deadline:
             time.sleep(0.02)
         if shutil.which("flock"):
-            subprocess.run(["flock", str(d / "lock"), "true"], timeout=10)
+            subprocess.run(["flock", str(d / "lock"), "true"], timeout=10, stdin=subprocess.DEVNULL)
         else:
             while (d / "lock.d").exists() and time.time() < deadline + 10:
                 time.sleep(0.02)
@@ -781,7 +782,7 @@ class InstallHooksTests(unittest.TestCase):
             env = {**os.environ, "HOME": home}
             for _ in range(2):
                 r = subprocess.run([str(CLI), "install-hooks", "claude"],
-                                   capture_output=True, text=True, env=env)
+                                   capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
                 self.assertEqual(r.returncode, 0, r.stderr)
             data = json.loads(settings.read_text())
             self.assertEqual(data["model"], "x")
@@ -802,7 +803,7 @@ class InstallHooksTests(unittest.TestCase):
             env = {**os.environ, "HOME": home}
             for args in (["claude", "opencode"], ["--remove", "claude", "opencode"]):
                 r = subprocess.run([str(CLI), "install-hooks", *args],
-                                   capture_output=True, text=True, env=env)
+                                   capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
                 self.assertEqual(r.returncode, 0, r.stderr)
             self.assertEqual(json.loads(settings.read_text())["hooks"],
                              {"Stop": [{"hooks": [{"type": "command", "command": "other"}]}]})
@@ -812,7 +813,7 @@ class InstallHooksTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="ta-home-") as home:
             r = subprocess.run([str(CLI), "install-hooks", "opencode"],
                                capture_output=True, text=True,
-                               env={**os.environ, "HOME": home})
+                               env={**os.environ, "HOME": home}, stdin=subprocess.DEVNULL)
             self.assertEqual(r.returncode, 0, r.stderr)
             plugin = Path(home) / ".config/opencode/plugins/tmux-agent"
             self.assertEqual(plugin.resolve(), ROOT / "opencode")
@@ -828,7 +829,7 @@ class EntryPointTests(unittest.TestCase):
             log = fake_tmux(directory, replies)
             r = subprocess.run(
                 [str(ENTRY)], capture_output=True, text=True,
-                env={**os.environ, "PATH": f"{directory}:{os.environ['PATH']}"},
+                env={**os.environ, "PATH": f"{directory}:{os.environ['PATH']}"}, stdin=subprocess.DEVNULL,
             )
             self.assertEqual(r.returncode, 0, r.stderr)
             return log.read_text().splitlines()
@@ -939,7 +940,7 @@ dispose();
                 ["node", "--input-type=module", "-e", self.SCRIPT],
                 capture_output=True, text=True, timeout=30,
                 env={**os.environ, "PLUGIN_URL": plugin.as_uri(),
-                     "TMUX_PANE": "%1", "TMUX_AGENT_BIN": str(bin_), "LOG": str(log)},
+                     "TMUX_PANE": "%1", "TMUX_AGENT_BIN": str(bin_), "LOG": str(log)}, stdin=subprocess.DEVNULL,
             )
             self.assertEqual(r.returncode, 0, r.stderr)
             deadline = time.time() + 5
@@ -1036,7 +1037,7 @@ class RemoteTestSupport:
     def cli(self, *args, **env):
         self.tmux_log = fake_tmux(self.fake, self.tmux_replies)
         return subprocess.run([str(CLI), *args], capture_output=True, text=True,
-                              env={**self.env, **env}, timeout=20)
+                              env={**self.env, **env}, timeout=20, stdin=subprocess.DEVNULL)
 
     def fetch(self, **env):
         r = self.cli("remote-refresh", **env)
@@ -1248,7 +1249,7 @@ class RemoteTests(RemoteTestSupport, unittest.TestCase):
         self.assertEqual(len([c for c in self.ssh_calls() if c.endswith("watch")]), 1)
 
     def test_a_live_watcher_replaces_polling_and_a_silent_one_is_replaced(self):
-        sleeper = subprocess.Popen(["sleep", "30"])
+        sleeper = subprocess.Popen(["sleep", "30"], stdin=subprocess.DEVNULL)
         self.addCleanup(sleeper.kill)
         (self.state / f"remote-{self.KEY}.pid").write_text(f"{sleeper.pid}\n")
         meta = self.state / f"remote-{self.KEY}.meta"
@@ -1265,7 +1266,7 @@ class RemoteTests(RemoteTestSupport, unittest.TestCase):
         self.local("%1", "blocked")
         self.env["TMUX_AGENT_STATE_DIR"] = str(self.state)
         self.tmux_log = fake_tmux(self.fake, self.tmux_replies)
-        p = subprocess.Popen([str(CLI), "watch"], stdout=subprocess.PIPE, text=True, env=self.env)
+        p = subprocess.Popen([str(CLI), "watch"], stdout=subprocess.PIPE, text=True, env=self.env, stdin=subprocess.DEVNULL)
         self.addCleanup(p.kill)
         first = [p.stdout.readline(), p.stdout.readline()]
         self.assertEqual(first, ["blocked|claude|%1|main:1.1|@1|0|/src/app\n", "--\n"])
@@ -1437,7 +1438,7 @@ class RemoteTests(RemoteTestSupport, unittest.TestCase):
         env = {k: v for k, v in self.env.items() if k != "TMUX_AGENT_QUIET"}
         env["TMUX_AGENT_NOTIFY_METHOD"] = "desktop"
         self.tmux_log = fake_tmux(self.fake, self.tmux_replies)
-        subprocess.run([str(CLI), "remote-refresh"], env=env, timeout=20)
+        subprocess.run([str(CLI), "remote-refresh"], env=env, timeout=20, stdin=subprocess.DEVNULL)
         self.assertTrue(wait_for(lambda: "switch-client -c /dev/pts/4 -t @7"
                                  in self.tmux_calls()), self.tmux_calls())
         # The body carries the detail fetched over ssh (the fake ssh answers

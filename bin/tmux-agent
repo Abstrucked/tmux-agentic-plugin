@@ -59,8 +59,9 @@
 # Remote agents: hosts in @tmux-agent-remotes, plus live ssh ControlMaster
 # connections, are asked over ssh for their agents (lib/remote.sh). They
 # show up everywhere local ones do, as agent@host, and jumping to one opens
-# a window with a nested tmux client on that host. Pane arguments take
-# "<key>/<pane>" ids for them.
+# a live pane mirror in the local remote-agents session (a window with a
+# nested tmux client on that host with @tmux-agent-remote-view attach).
+# Pane arguments take "<key>/<pane>" ids for them.
 #
 # State is cached in $TMUX_AGENT_STATE_DIR (default
 # $XDG_RUNTIME_DIR or /tmp, then tmux-agent-$UID/<tmux server>, mode 0700).
@@ -329,6 +330,15 @@ scan() {
         [[ -e $f ]] || continue
         base=${f##*-}
         [[ -n ${live[$base]:-} ]] || rm -f "$f"
+    done
+    # Mirror bridge status of panes that are neither agents nor mirrors now.
+    for f in "$TA_STATE_DIR"/mirror-%*.status; do
+        [[ -e $f ]] || continue
+        base=${f##*mirror-}
+        base=${base%.status}
+        if [[ $base =~ ^%[0-9]+$ && -z ${live[$base]:-} && -z ${mirror_panes[$base]:-} ]]; then
+            rm -f "$f"
+        fi
     done
     # Notification ids of panes that are gone (remote ones contain "_").
     for f in "$TA_STATE_DIR"/notif-%*; do

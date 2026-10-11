@@ -57,7 +57,7 @@ class DoctorBase(unittest.TestCase):
     def cli(self, *args, **env):
         self.tmux_log = fake_tmux(self.fake, self.replies)
         return subprocess.run([str(CLI), *args], capture_output=True, text=True,
-                              env={**self.env, **env}, timeout=30)
+                              env={**self.env, **env}, timeout=30, stdin=subprocess.DEVNULL)
 
     def write(self, rel, data):
         p = self.home / rel
@@ -218,7 +218,7 @@ class ExplainTests(DoctorBase):
     def setUp(self):
         super().setUp()
         # An "agent": a process whose argv names claude.
-        self.proc = subprocess.Popen(["bash", "-c", "exec -a claude sleep 60"])
+        self.proc = subprocess.Popen(["bash", "-c", "exec -a claude sleep 60"], stdin=subprocess.DEVNULL)
         self.addCleanup(self.proc.wait)
         self.addCleanup(self.proc.kill)
         time.sleep(0.2)

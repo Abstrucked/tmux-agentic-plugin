@@ -51,7 +51,7 @@ class SnapshotTests(unittest.TestCase):
             proc.wait()
 
     def spawn(self, script):
-        proc = subprocess.Popen(["bash", "-c", script])
+        proc = subprocess.Popen(["bash", "-c", script], stdin=subprocess.DEVNULL)
         self.procs = getattr(self, "procs", [])
         self.procs.append(proc)
         time.sleep(0.2)

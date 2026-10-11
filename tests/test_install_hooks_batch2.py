@@ -23,7 +23,7 @@ class CodexInstallHooksTests(unittest.TestCase):
     def run_cli(self, *args):
         r = subprocess.run([str(CLI), "install-hooks", *args],
                            capture_output=True, text=True,
-                           env={**os.environ, "HOME": str(self.home)})
+                           env={**os.environ, "HOME": str(self.home)}, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stderr)
         return r
 
