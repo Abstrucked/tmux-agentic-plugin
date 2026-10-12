@@ -718,13 +718,18 @@ class HookTests(unittest.TestCase):
                 self.assertEqual(self.state_of(event), state)
 
     def run_hook(self, state_dir, event, pane="%999"):
-        # A pane id no tmux server knows: the background rescan drops it,
-        # so only the synchronous report write is observed here.
+        # tmux lists the pane, so the background rescan keeps its report.
+        fake = tempfile.mkdtemp(prefix="ta-hook-bin-")
+        self.addCleanup(shutil.rmtree, fake, ignore_errors=True)
+        fake_tmux(fake, {"list-panes -a -F #{pane_id}|#{pane_pid}|#{window_id}|"
+                         "#{session_name}:#{window_index}.#{pane_index}|#{pane_current_path}":
+                         f"{pane}|4199999|@9|main:1.1|/project\n"})
         return subprocess.run(
             [str(CLI), "hook", "claude", event], input='{"session_id": "x"}',
             capture_output=True, text=True,
             env={**os.environ, "TMUX_AGENT_QUIET": "1",
-                 "TMUX_AGENT_STATE_DIR": state_dir, "TMUX_PANE": pane},
+                 "TMUX_AGENT_STATE_DIR": state_dir, "TMUX_PANE": pane,
+                 "PATH": f"{fake}:{os.environ['PATH']}"},
         )
 
     @contextlib.contextmanager

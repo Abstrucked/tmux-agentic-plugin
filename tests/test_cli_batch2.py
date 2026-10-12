@@ -194,18 +194,25 @@ class GuardedSendTests(Base):
 
 
 class HookDetailTests(Base):
+    def setUp(self):
+        super().setUp()
+        # The hook's background rescan sweeps files of panes tmux does not
+        # list: keep %999 alive so it leaves its detail alone.
+        fake_tmux(self.fake, {PANES: "%999|4199999|@9|main:1.1|/project\n"})
+
     def hook(self, event, payload):
-        settle_dir = self.state
-        self.addCleanup(HookTests.settle, str(settle_dir))
-        return subprocess.run(
+        self.addCleanup(HookTests.settle, str(self.state))
+        r = subprocess.run(
             [str(CLI), "hook", "claude", event], input=payload, capture_output=True,
             text=True, env={**self.env, "TMUX_PANE": "%999"})
+        # Let the background rescan finish, so detail() reads settled state.
+        HookTests.settle(str(self.state))
+        return r
 
     def detail(self):
         return self.run_cli("detail", "--pane", "%999").stdout.strip()
 
     def test_official_stop_failure_payload(self):
-        fake_tmux(self.fake)
         r = self.hook("StopFailure",
                       '{"error":"rate_limit","error_details":"429 Too Many Requests",'
                       '"last_assistant_message":"API Error: Rate limit reached"}')
@@ -213,12 +220,10 @@ class HookDetailTests(Base):
         self.assertEqual(self.detail(), "rate_limit: 429 Too Many Requests")
 
     def test_message_only_falls_back_to_the_last_assistant_message(self):
-        fake_tmux(self.fake)
         self.hook("StopFailure", '{"last_assistant_message":"\\n\\n API Error: Rate limit reached\\nmore"}')
         self.assertEqual(self.detail(), "API Error: Rate limit reached")
 
     def test_older_aliases_still_work(self):
-        fake_tmux(self.fake)
         self.hook("StopFailure", '{"error_type":"overloaded","error_message":"busy"}')
         self.assertEqual(self.detail(), "overloaded: busy")
 

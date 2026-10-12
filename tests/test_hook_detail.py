@@ -188,7 +188,9 @@ class HookDetailTests(Sandbox):
             path = shutil.which(tool)
             if path:
                 (nojq / tool).symlink_to(path)
-        (nojq / "tmux").write_text("#!/bin/sh\nexit 0\n")
+        # Lists %999 so the rescan keeps its report.
+        (nojq / "tmux").write_text(
+            '#!/bin/sh\ncase "$1" in list-panes) echo "%999|4199999|@9|main:1.1|/project" ;; esac\n')
         (nojq / "tmux").chmod(0o755)
         r = subprocess.run(
             [str(CLI), "hook", "claude", "Notification"], input='{"message": "x"}',
