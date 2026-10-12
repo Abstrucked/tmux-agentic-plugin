@@ -16,6 +16,7 @@ import tempfile
 import termios
 import time
 import unittest
+import unittest.mock
 import fcntl
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -110,8 +111,47 @@ class InputTests(unittest.TestCase):
         self.assertEqual(self.events, [('raw', (b'\x1b',))])
 
 
+class DisconnectTests(unittest.TestCase):
+    def mirror(self, command):
+        # Under pytest fd 0 is /dev/null, which epoll refuses.
+        with unittest.mock.patch.object(bridge.selectors, 'DefaultSelector'):
+            mirror = bridge.Mirror(argparse.Namespace(), None)
+        mirror.process = subprocess.Popen(command, start_new_session=True, stdin=subprocess.PIPE,
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.addCleanup(lambda: mirror.process and mirror.process.kill())
+        return mirror
+
+    def test_killpg_eperm_still_reaps_the_child(self):
+        mirror = self.mirror(['sleep', '30'])
+        process = mirror.process
+        # macOS answers EPERM for a process group of only zombies.
+        with unittest.mock.patch.object(bridge.os, 'killpg', side_effect=PermissionError):
+            mirror.disconnect()
+        self.assertIsNotNone(process.returncode)
+        self.assertIsNone(mirror.process)
+
+    def test_disconnect_after_the_child_exited(self):
+        mirror = self.mirror(['true'])
+        process = mirror.process
+        process.wait()
+        with unittest.mock.patch.object(bridge.os, 'killpg', side_effect=PermissionError):
+            mirror.disconnect()
+        self.assertIsNotNone(process.returncode)
+        self.assertIsNone(mirror.process)
+
+
 @unittest.skipUnless(shutil.which('tmux'), 'needs tmux')
 class RealMirrorTests(unittest.TestCase):
+    def attrs(self):
+        return self.stable(termios.tcgetattr(self.slave))
+
+    @staticmethod
+    def stable(attrs):
+        # PENDIN is a kernel status bit on macOS, not a setting the code changed.
+        attrs = list(attrs)
+        attrs[3] &= ~getattr(termios, 'PENDIN', 0)
+        return attrs
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='ta-mirror-', dir='/tmp')
         self.addCleanup(self.tmp.cleanup)
@@ -214,7 +254,7 @@ class RealMirrorTests(unittest.TestCase):
         self.assertEqual(self.layout(), self.before)
         self.stop()
         self.assertEqual(self.process.returncode, 0)
-        self.assertEqual(termios.tcgetattr(self.slave), self.saved)
+        self.assertEqual(self.attrs(), self.stable(self.saved))
         self.assertEqual(self.layout(), self.before)
 
     def test_chord_fits_then_restores_exactly(self):
@@ -243,7 +283,7 @@ class RealMirrorTests(unittest.TestCase):
         self.wait_for(self.is_fitted)
         self.stop()
         self.assertEqual(self.process.returncode, 0)
-        self.assertEqual(termios.tcgetattr(self.slave), self.saved)
+        self.assertEqual(self.attrs(), self.stable(self.saved))
         self.assert_restored()
 
     def test_signals_toggle_fit_and_status_file(self):
@@ -300,7 +340,7 @@ class RealMirrorTests(unittest.TestCase):
         self.run_tmux('kill-pane', '-t', self.pane)
         self.process.wait(timeout=5)
         self.assertEqual(self.process.returncode, 1, self.process.stderr.read().decode())
-        self.assertEqual(termios.tcgetattr(self.slave), self.saved)
+        self.assertEqual(self.attrs(), self.stable(self.saved))
         self.assertEqual(json.loads(self.status.read_text())['state'], 'closed')
 
     def test_reconnect_discards_input_typed_while_disconnected(self):

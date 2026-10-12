@@ -367,6 +367,16 @@ class Mirror:
         self.last_meta = self.last_frame = 0
         self.status('connecting')
 
+    def stop_process(self, sig, fallback):
+        # macOS raises EPERM, not ESRCH, for a group of only zombies.
+        try:
+            os.killpg(self.process.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            try:
+                fallback()
+            except ProcessLookupError:
+                pass
+
     def disconnect(self):
         self.ready = self.busy = self.fit_busy = False
         self.input.discard()
@@ -379,13 +389,15 @@ class Mirror:
                 except (KeyError, ValueError):
                     pass
             if self.process.poll() is None:
+                self.stop_process(signal.SIGTERM, self.process.terminate)
                 try:
-                    os.killpg(self.process.pid, signal.SIGTERM)
                     self.process.wait(timeout=1)
-                except (ProcessLookupError, subprocess.TimeoutExpired):
-                    if self.process.poll() is None:
-                        os.killpg(self.process.pid, signal.SIGKILL)
-                        self.process.wait()
+                except subprocess.TimeoutExpired:
+                    self.stop_process(signal.SIGKILL, self.process.kill)
+            try:
+                self.process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
             for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
                 stream.close()
         self.process = None

@@ -23,11 +23,11 @@ class Sandbox(unittest.TestCase):
     def setUp(self):
         # Hooks leave a background rescan that may still write into the
         # state dir while it is removed.
-        self._tmp = tempfile.TemporaryDirectory(prefix="ta-detail-", ignore_cleanup_errors=True)
-        self.addCleanup(self._tmp.cleanup)
+        self._tmp = tempfile.mkdtemp(prefix="ta-detail-")
+        self.addCleanup(shutil.rmtree, self._tmp, ignore_errors=True)
         # ...and runs first: wait for it before the dir goes.
         self.addCleanup(lambda: HookTests.settle(str(self.dir / "state"), wait_stamp=False))
-        self.dir = Path(self._tmp.name)
+        self.dir = Path(self._tmp)
         self.state = self.dir / "state"
         self.state.mkdir()
         self.fake = self.dir / "bin"
