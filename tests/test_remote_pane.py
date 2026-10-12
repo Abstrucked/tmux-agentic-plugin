@@ -140,6 +140,40 @@ class DisconnectTests(unittest.TestCase):
         self.assertIsNone(mirror.process)
 
 
+class HandshakeTests(unittest.TestCase):
+    def test_connected_waits_for_metadata_and_first_frame(self):
+        class Terminal:
+            def dimensions(self):
+                return 80, 24
+
+            def write(self, text):
+                pass
+
+        status = Path(tempfile.mkdtemp(prefix='ta-hs-', dir='/tmp')) / 'mirror.status'
+        self.addCleanup(shutil.rmtree, str(status.parent), True)
+        with unittest.mock.patch.object(bridge.selectors, 'DefaultSelector'):
+            mirror = bridge.Mirror(argparse.Namespace(status_file=str(status), pane='%1'), Terminal())
+        sent = []
+        mirror.protocol = bridge.Protocol(sent.append, mirror.output)
+        mirror.status('connecting')
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, write_fd)
+        with os.fdopen(read_fd, 'rb', buffering=0) as stream:
+            os.write(write_fd, bridge.HEADER + b'\n')
+            mirror.read('out', stream)
+        state = lambda: json.loads(status.read_text())['state']
+        self.assertTrue(mirror.ready)
+        self.assertNotEqual(state(), 'connected')
+        mirror.raw(b'x')
+        self.assertEqual(bytes(mirror.raw_input), b'')
+        mirror.metadata(True, [b'80|24|0|0|1|0|$1|0|0|0|0|0|0|0'])
+        self.assertNotEqual(state(), 'connected')
+        mirror.screen(True, [b''] * 24)
+        self.assertEqual(state(), 'connected')
+        mirror.raw(b'x')
+        self.assertEqual(bytes(mirror.raw_input), b'x')
+
+
 @unittest.skipUnless(shutil.which('tmux'), 'needs tmux')
 class RealMirrorTests(unittest.TestCase):
     def attrs(self):

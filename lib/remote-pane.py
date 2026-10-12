@@ -706,7 +706,7 @@ class Mirror:
                     self.session = None
                     self.meta = None
                     self.fit_work = True
-                    self.status('connected')
+                    # 'connected' waits for the first frame; input is dropped until metadata arrives.
                 else:
                     raise Unsupported('remote mirror endpoint unavailable; update the remote plugin or use @tmux-agent-remote-view attach')
             else:
