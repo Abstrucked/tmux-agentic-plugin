@@ -1,6 +1,6 @@
-"""Batch 2 CLI behaviour: private per-server state dirs, the guarded send,
-StopFailure details, attach --urgent, remote seen/detail/wait and mobile's
-keyed listen port (bin/tmux-agent)."""
+"""CLI behaviour (bin/tmux-agent): private per-server state dirs, the guarded
+send, StopFailure hook detail, attach --urgent, remote parity (seen/detail/
+wait), server targeting, lock fallback and mobile's keyed listen port."""
 
 import os
 import shutil

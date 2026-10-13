@@ -1,3 +1,5 @@
+"""Hook installation for codex and other agents (bin/tmux-agent install-hooks)."""
+
 import json
 import os
 import subprocess
