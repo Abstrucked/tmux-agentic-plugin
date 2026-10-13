@@ -10,7 +10,7 @@
       "name": "tmux-agentic-plugin",
       "source": "./",
       "description": "Reports Claude Code session state, including API errors, to the tmux agent strip, picker and notifications on local and SSH hosts.",
-      "version": "0.3.0"
+      "version": "0.4.0"
     }
   ]
 }
