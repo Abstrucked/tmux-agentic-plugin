@@ -27,9 +27,14 @@ analytics of any kind.
   and it sends whatever your command sends, wherever it sends it.
 - **Remote agents (optional).** To show agents on other machines, the plugin
   runs `ssh` to hosts you list in `@tmux-agent-remotes`, to hosts you already
-  have a live ssh ControlMaster connection to, and, unless you set
-  `@tmux-agent-remote-tailscale off`, to online peers of your tailnet. Peers
+  have a live ssh ControlMaster connection to, and, if you set
+  `@tmux-agent-remote-tailscale on`, to online peers of your tailnet (off by
+  default). Peers
   are found with the local `tailscale status --json` command. These
   connections use your own ssh keys and run `tmux-agent` on the remote host
-  to read its agent states. Turn each part off with
-  `@tmux-agent-remote-discover off` and `@tmux-agent-remote-tailscale off`.
+  to read its agent states. Turn connection discovery off with
+  `@tmux-agent-remote-discover off`.
+- **Remote pane mirrors.** Opening a remote agent sends its screen snapshots
+  and your input over the SSH connection between your own machines. The
+  bridge records only connection state and errors in `mirror-<pane>.status`
+  in the private state directory; it does not record screen contents or input.

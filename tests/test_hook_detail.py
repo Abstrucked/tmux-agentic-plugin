@@ -23,11 +23,11 @@ class Sandbox(unittest.TestCase):
     def setUp(self):
         # Hooks leave a background rescan that may still write into the
         # state dir while it is removed.
-        self._tmp = tempfile.TemporaryDirectory(prefix="ta-detail-", ignore_cleanup_errors=True)
-        self.addCleanup(self._tmp.cleanup)
+        self._tmp = tempfile.mkdtemp(prefix="ta-detail-")
+        self.addCleanup(shutil.rmtree, self._tmp, ignore_errors=True)
         # ...and runs first: wait for it before the dir goes.
         self.addCleanup(lambda: HookTests.settle(str(self.dir / "state"), wait_stamp=False))
-        self.dir = Path(self._tmp.name)
+        self.dir = Path(self._tmp)
         self.state = self.dir / "state"
         self.state.mkdir()
         self.fake = self.dir / "bin"
@@ -188,7 +188,9 @@ class HookDetailTests(Sandbox):
             path = shutil.which(tool)
             if path:
                 (nojq / tool).symlink_to(path)
-        (nojq / "tmux").write_text("#!/bin/sh\nexit 0\n")
+        # Lists %999 so the rescan keeps its report.
+        (nojq / "tmux").write_text(
+            '#!/bin/sh\ncase "$1" in list-panes) echo "%999|4199999|@9|main:1.1|/project" ;; esac\n')
         (nojq / "tmux").chmod(0o755)
         r = subprocess.run(
             [str(CLI), "hook", "claude", "Notification"], input='{"message": "x"}',
@@ -391,7 +393,7 @@ class DetailDiffTests(Sandbox):
 
     def git(self, repo, *args):
         subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t",
-                        *args], check=True, capture_output=True)
+                        *args], check=True, capture_output=True, stdin=subprocess.DEVNULL)
 
     def test_diff_shows_changes_and_untracked_files(self):
         repo = self.dir / "repo"
