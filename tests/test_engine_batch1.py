@@ -2,6 +2,7 @@
 
 import os
 import re
+import signal
 import subprocess
 import tempfile
 import time
@@ -45,15 +46,21 @@ class ErrorStateTests(unittest.TestCase):
 
 
 class SnapshotTests(unittest.TestCase):
-    def tearDown(self):
-        for proc in getattr(self, "procs", []):
-            proc.kill()
+    def spawn(self, script):
+        # Own session so cleanup can kill the whole group, including
+        # grandchildren such as an inner `exec -a codex sleep 300`.
+        proc = subprocess.Popen(["bash", "-c", script],
+                                stdin=subprocess.DEVNULL,
+                                start_new_session=True)
+
+        def cleanup():
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass  # group gone (macOS: EPERM when only zombies remain)
             proc.wait()
 
-    def spawn(self, script):
-        proc = subprocess.Popen(["bash", "-c", script], stdin=subprocess.DEVNULL)
-        self.procs = getattr(self, "procs", [])
-        self.procs.append(proc)
+        self.addCleanup(cleanup)
         time.sleep(0.2)
         return proc
 
