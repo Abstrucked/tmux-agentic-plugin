@@ -2,8 +2,8 @@
 
 [![HOL Guard](https://img.shields.io/endpoint?url=https%3A%2F%2Fhol.org%2Fapi%2Fregistry%2Fbadges%2Fguard%2FAbstrucked%2Ftmux-agentic-plugin&style=flat-square)](https://hol.org/registry/plugins/abstrucked%2Ftmux-agentic-plugin)
 
-See at a glance what your coding agents are doing across every tmux session,
-and jump straight to the one that needs you.
+See at a glance what your coding agents are doing across tmux sessions and
+SSH hosts, and jump straight to the one that needs you.
 
 ![Agent strip in the tmux status bar: a blocked claude named, then counts of ready and idle agents](docs/strip.png)
 
@@ -32,6 +32,9 @@ you look at it.
 - **Jump** (`prefix + A`): straight to the next blocked agent, then ones in
   error, then finished ones you have not looked at. Press again to cycle
   through them.
+- **Remote pane mirrors**: open an agent on an SSH host in the local
+  `remote-agents` session, with one window per agent. Type into the agent
+  without changing its remote layout or nesting another tmux session.
 - **Notifications** when an agent you are not looking at gets blocked,
   hits an error or finishes: desktop, in your terminal, or through a command
   of your own such as a phone push. Click a desktop one to jump to that pane,
@@ -49,6 +52,7 @@ you look at it.
 
 - tmux 3.2+ (`display-popup`)
 - bash 4+ (on macOS: `brew install bash`)
+- Python 3.9+ on the local machine for the default remote pane mirror view
 - [fzf](https://github.com/junegunn/fzf) for the picker. Its actions need any
   recent fzf; the error line in the picker header needs 0.40+; the
   auto-refreshing list needs 0.71+ and curl (otherwise press ctrl-l). The
@@ -260,11 +264,42 @@ your ssh keys are the only credentials. A host that can't be reached, or
 whose answer is more than six intervals old, drops out; the local strip
 never waits on ssh.
 
-Jumping to a remote agent opens a local window named `@host` running
-`ssh -t host tmux attach` on that pane's session. Later jumps reuse the
-window and move its client to the pane. The inner tmux gets its own prefix
-by pressing the prefix twice, as long as your config has
-`bind <prefix> send-prefix`.
+Jumping to a remote agent opens its live pane mirror in a local session named
+`remote-agents`, with one reusable window per agent. The mirror sends terminal
+snapshots over a persistent SSH control-mode connection, so the remote pane's
+layout, size and running process stay as they are. The first jump creates the
+window; later jumps reuse it. If the connection drops, the bridge retries
+after 1, 2, 5 and 10 seconds without replaying input. Closing a mirror only
+stops its bridge; it does not stop the remote pane or agent.
+
+In the mirror, `Ctrl-]` followed by an arrow pans the view, `Ctrl-]` then
+PageUp/PageDown scrolls history, and `Ctrl-]` then `0` returns to cursor-follow
+mode. `Ctrl-]` then `f` toggles fit (below). Press `Ctrl-]` twice to send a literal
+`Ctrl-]` to the remote pane. The local
+`tmux-agent mirror --pane <host-key>/<pane>` and remote
+`tmux-agent mirror-connect --pane <pane>` commands implement this bridge.
+
+Fit makes the remote pane match the mirror: it zooms the agent's pane if its
+window is split, resizes the remote window to the mirror's size, and follows
+local resizes, such as a phone attaching, while on. Toggle it with `Ctrl-]`
+then `f`, `tmux-agent mirror-fit [on|off|toggle]`, or a prefix key you set with
+`@tmux-agent-mirror-fit-key` (none by default). It changes the
+remote window for every client attached to it until turned off. Turning it off,
+or closing the mirror, restores the window's size, zoom, layout and active pane.
+The original state is kept on the remote window, so a mirror opened after a
+crash starts fitted and toggling off restores it. Fit needs nothing new on the
+remote host.
+
+The default `@tmux-agent-remote-view mirror` needs Python 3.9+ locally and the
+updated plugin on both hosts. To use the previous nested-tmux attach behavior,
+set `@tmux-agent-remote-view attach`; it does not need Python and is useful
+while remote hosts are still on an older plugin. Both modes retain the tmux
+3.2+ minimum.
+
+When upgrading, update the tmux plugin on the local machine and each remote
+host, then reload each tmux config. Run `tmux-agent doctor` locally to check
+Python and the selected remote view. A host with an older plugin can still
+be detected, but cannot serve a mirror; use `attach` until it is updated.
 
 Requirements on each remote host: tmux, bash 4+ and this plugin, installed
 by TPM in the usual place. Otherwise, point `@tmux-agent-remote-command` at
@@ -329,6 +364,7 @@ window is one of its ancestors.
 |-------------------------------|---------------|--------|
 | `@tmux-agent-key`             | `a`           | picker key after the prefix; `off` for none |
 | `@tmux-agent-urgent-key`      | `A`           | jump key after the prefix; `off` for none |
+| `@tmux-agent-mirror-fit-key`  | `off`         | key after the prefix that toggles fit for the current mirror, e.g. `F` |
 | `@tmux-agent-popup-size`      | `80%`         | picker popup width and height |
 | `@tmux-agent-strip-position`  | `interpolate` | `interpolate`: replace `#{agent_status}` in `status-left`/`status-right`; `centre`: put the strip in the middle of the status bar; `off`: no strip |
 | `@tmux-agent-strip-max`       | `4`           | agents shown by name before switching to counts |
@@ -340,8 +376,9 @@ window is one of its ancestors.
 | `@tmux-agent-notify-command`  | empty         | command run on every notification, with `TA_*` variables; for phone push |
 | `@tmux-agent-raise-command`   | detected      | raises the terminal window when a notification is clicked; a command (gets the client PID) or `off` |
 | `@tmux-agent-remotes`         | empty         | ssh aliases whose agents to show (see [Remote agents](#remote-agents)) |
+| `@tmux-agent-remote-view`     | `mirror`      | remote pane view: `mirror`, or legacy nested-tmux `attach` |
 | `@tmux-agent-remote-discover` | `on`          | also ask hosts with a live ssh ControlMaster connection; `off` for the list only |
-| `@tmux-agent-remote-tailscale` | `on`         | also ask every online Linux/macOS tailnet peer (needs `tailscale` and `jq`); hosts without tmux-agent are retried every 5 minutes and show as `noplugin` in `tmux-agent remotes` |
+| `@tmux-agent-remote-tailscale` | `off`        | `on` also asks every online Linux/macOS tailnet peer (needs `tailscale` and `jq`); `~/.ssh/config` applies to each peer by name. Hosts without tmux-agent are retried every 5 minutes and show as `noplugin` in `tmux-agent remotes`; failing hosts are retried with backoff, up to every 30 minutes |
 | `@tmux-agent-remote-watch`    | `on`          | keep a `tmux-agent watch` running over ssh to each host that has one, so changes show within a second; hosts without it (older plugin) are polled every interval |
 | `@tmux-agent-remote-interval` | `10`          | seconds between fetches from remote hosts |
 | `@tmux-agent-ssh-sockets`     | `~/.ssh/master-*` | glob matching your ControlMaster sockets |
@@ -366,6 +403,8 @@ tmux-agent focus --pane %3     switch a client to %3 and raise its terminal
 tmux-agent send --pane %3 (--key K | --text T)... [--expect-state blocked]
                                type into an agent pane; exits 3 without
                                typing unless it is in that state
+tmux-agent mirror-fit [on|off|toggle] [-t %3]
+                               fit a remote pane mirror's window to the mirror
 tmux-agent mobile              tap-friendly agent list for a phone terminal
 tmux-agent detail --pane %3    why the agent stopped, as its hook reported
 tmux-agent doctor              check the install; exits 1 on any FAIL
@@ -411,16 +450,24 @@ between servers, readable by other users; you can delete it.
 ## Development
 
 ```sh
-shellcheck bin/tmux-agent lib/engine.sh lib/remote.sh lib/notify.sh lib/pick.sh lib/doctor.sh lib/install-hooks lib/raise tmux-agentic.tmux
+shellcheck bin/tmux-agent lib/engine.sh lib/remote.sh lib/mirror.sh lib/notify.sh lib/pick.sh lib/doctor.sh lib/install-hooks lib/raise tmux-agentic.tmux
 pytest tests
 ```
+
+CI runs these checks on Linux and macOS. HOL Guard runs separately on pull
+requests, pushes to `main`, weekly and manual dispatches, using the pinned
+workflow in [.github/workflows/guarded-repository.yml](.github/workflows/guarded-repository.yml).
+Its scanner uses `strict-security` and fails on high or critical findings.
+SARIF upload, signed provenance and public verification registration run in
+GitHub Actions; a local scanner run checks the code without refreshing the
+published badge.
 
 ## Privacy
 
 The plugin has no telemetry and sends nothing to the author or any third
 party. Remote agents are fetched over your own ssh, from the hosts you list,
-live ControlMaster connections and, unless `@tmux-agent-remote-tailscale` is
-`off`, your tailnet peers. See [PRIVACY.md](PRIVACY.md).
+live ControlMaster connections and, with `@tmux-agent-remote-tailscale` `on`,
+your tailnet peers. See [PRIVACY.md](PRIVACY.md).
 
 ## License
 

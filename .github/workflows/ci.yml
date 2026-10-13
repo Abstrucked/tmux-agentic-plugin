@@ -12,25 +12,41 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - {os: ubuntu-latest, python: "3.x"}
+          - {os: macos-latest, python: "3.x"}
+          # Documented minimums: tmux 3.2a (ubuntu-22.04 apt) and Python 3.9.
+          - {os: ubuntu-22.04, python: "3.9"}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y jq shellcheck
+        run: sudo apt-get update && sudo apt-get install -y jq shellcheck tmux
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
         # macOS ships bash 3.2; the plugin needs bash 4+ first on PATH.
         run: |
-          brew install bash jq shellcheck
+          brew install bash jq shellcheck tmux
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.x"
+          python-version: ${{ matrix.python }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
-      - run: pip install --require-hashes -r requirements-dev.txt
-      - run: shellcheck bin/tmux-agent lib/engine.sh lib/remote.sh lib/notify.sh lib/pick.sh lib/doctor.sh lib/install-hooks lib/raise tmux-agentic.tmux
-      - run: pytest tests
+      - name: Install test dependencies
+        # pytest 9 and iniconfig 2.3 require Python >=3.10; the 3.9 row uses unittest.
+        if: matrix.python != '3.9'
+        run: pip install --require-hashes -r requirements-dev.txt
+      - name: shellcheck
+        if: matrix.os == 'ubuntu-latest'
+        run: shellcheck bin/tmux-agent lib/engine.sh lib/remote.sh lib/mirror.sh lib/notify.sh lib/pick.sh lib/doctor.sh lib/install-hooks lib/raise tmux-agentic.tmux
+      - name: Tests (pytest)
+        if: matrix.python != '3.9'
+        run: pytest tests
+      - name: Tests (unittest, Python 3.9)
+        if: matrix.python == '3.9'
+        # pytest gives tests an empty stdin; unittest must too, or a fake fzf
+        # that reads stdin waits forever.
+        run: python -m unittest discover -s tests -v </dev/null

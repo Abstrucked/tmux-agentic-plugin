@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- Remote discovery is gentler. Asking every tailnet peer is now opt-in:
+  `@tmux-agent-remote-tailscale` defaults to `off`; set it to `on` to keep the
+  old behaviour. Tailnet peers are now dialled by name, so `Host` blocks in
+  `~/.ssh/config` (User, IdentityFile, Port) apply, and the tailnet address
+  is used only when the config does not redirect the name. Hosts that keep
+  failing are retried with backoff, doubling from every minute up to every 30
+  minutes, instead of every minute forever; `tmux-agent remotes` shows the
+  failure count.
+- Remote pane mirrors can fit the remote window to the mirror's size with
+  `Ctrl-]` then `f` or `tmux-agent mirror-fit`; a prefix key can be bound
+  with `@tmux-agent-mirror-fit-key` (none by default). Turning fit off or
+  closing the mirror restores the remote window's size, zoom and layout.
+- Remote agent jumps now open live pane mirrors in the local `remote-agents`
+  session, preserving the remote pane's layout, size and process. Mirrors use
+  a persistent SSH control-mode bridge, retry disconnects without replaying
+  input, and support panning and history scrolling. This default needs Python
+  3.9+ locally and the updated plugin on both hosts. Set
+  `@tmux-agent-remote-view attach` for the previous nested-tmux behavior or
+  while upgrading remote hosts; it has no Python requirement. tmux 3.2+
+  remains the minimum for either view.
+- Mirror panes retain their remote agent identity for seen tracking and urgent
+  cycling, and are excluded from local agent detection. Looking at one mirror
+  suppresses notifications only for that agent, rather than the whole host.
 - The picker and `mobile` keep the cursor on the same agent when the list
   refreshes every 2 s, instead of jumping as rows reorder. Auto-refresh now
   needs fzf 0.71 (older fzf: press ctrl-l / ctrl-r).

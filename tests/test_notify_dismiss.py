@@ -56,9 +56,9 @@ class DismissTests(unittest.TestCase):
         # Let every waiting notify-send stand-in return, then check none is left.
         self.release.touch()
         gone = settle(lambda: subprocess.run(
-            ["pgrep", "-f", str(self.dir)], capture_output=True).returncode != 0)
+            ["pgrep", "-f", str(self.dir)], capture_output=True, stdin=subprocess.DEVNULL).returncode != 0)
         if not gone:
-            subprocess.run(["pkill", "-f", str(self.dir)])
+            subprocess.run(["pkill", "-f", str(self.dir)], stdin=subprocess.DEVNULL)
         self._tmp.cleanup()
         self.assertTrue(gone, "processes left behind")
 
@@ -233,7 +233,7 @@ while [ ! -e {shlex.quote(str(self.release))} ] && [ $i -lt 100 ]; do sleep 0.1;
         self.dbus()
         (self.state / "notif-%3").write_text("42\n")
         r = subprocess.run([str(CLI), "seen", "%3"], env=self.cli_env(),
-                           capture_output=True, text=True, timeout=10)
+                           capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(self.closed(), self.lines(self.dbus_log))
         self.assertFalse((self.state / "notif-%3").exists())
@@ -244,7 +244,7 @@ while [ ! -e {shlex.quote(str(self.release))} ] && [ $i -lt 100 ]; do sleep 0.1;
         self.tool("ssh", "exit 0\n")
         (self.state / "notif-k_%3").write_text("42\n")
         subprocess.run([str(CLI), "seen", "k/%3"], env=self.cli_env(),
-                       capture_output=True, text=True, timeout=10)
+                       capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
         self.assertTrue(self.closed(), self.lines(self.dbus_log))
         self.assertFalse((self.state / "notif-k_%3").exists())
 
@@ -256,7 +256,7 @@ while [ ! -e {shlex.quote(str(self.release))} ] && [ $i -lt 100 ]; do sleep 0.1;
             f"blocked|claude|0|{now}|{now}|main:1.1|@1|/project|1\n")
         (self.state / "notif-%3").write_text("42\n")
         r = subprocess.run([str(CLI), "attach", "--urgent"], env=self.cli_env(),
-                           capture_output=True, text=True, timeout=10)
+                           capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(self.closed(), self.lines(self.dbus_log))
         self.assertFalse((self.state / "notif-%3").exists())
@@ -270,7 +270,7 @@ while [ ! -e {shlex.quote(str(self.release))} ] && [ $i -lt 100 ]; do sleep 0.1;
             "show-option -gqv @tmux-agent-raise-command": "off"})
         (self.state / "notif-%3").write_text("42\n")
         r = subprocess.run([str(CLI), "focus", "--pane", "%3"], env=self.cli_env(),
-                           capture_output=True, text=True, timeout=10)
+                           capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(self.closed(), self.lines(self.dbus_log))
 
@@ -286,7 +286,7 @@ while [ ! -e {shlex.quote(str(self.release))} ] && [ $i -lt 100 ]; do sleep 0.1;
         e = self.cli_env({"TMUX_AGENT_NOTIFY_METHOD": "off"})
         e.pop("TMUX_AGENT_QUIET", None)
         r = subprocess.run([str(CLI), "refresh", "1"], env=e, capture_output=True,
-                           text=True, timeout=10)
+                           text=True, timeout=10, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_scan_dismisses_when_a_blocked_agent_goes_on_working(self):
