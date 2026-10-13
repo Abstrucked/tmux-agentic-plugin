@@ -185,16 +185,71 @@ ta_classify() {
     printf '%s\n' "$state"
 }
 
+_ta_word_is() {
+    # $1 basename, $2 agent name: the name, name-*, or name.js/mjs/cjs/py.
+    case "$1" in
+    "$2" | "$2"-* | "$2".js | "$2".mjs | "$2".cjs | "$2".py) return 0 ;;
+    esac
+    return 1
+}
+
 _ta_agent_match() {
     # $1 process name, $2 argv. Sets TA_AGENT_MATCH to the matched agent name
     # and returns 0, or returns 1. Prints nothing so a scan can call it per
     # process without a subshell.
-    # macOS ps reports comm as the executable path: match its basename.
-    # Bash =~ rather than grep: this runs per process per name, and a fork
-    # each made detection the slowest part of a scan.
-    local comm=${1,,} args=${2,,} name re
+    # A process matches by its comm basename (macOS ps reports comm as the
+    # executable path) or by argv: the program itself, or for an interpreter
+    # (node, bun, deno, python) the script it runs. The script matches by its
+    # basename, or by a directory named for the agent plus a generic entry
+    # file (cli.js, index.js, ...). Other words never count, so an editor
+    # opening claude.md or a language server under copilot.lua is not an agent.
+    # Bash only, no fork: this runs per process per scan.
+    local comm=${1,,} name a0 script='' w i dir='' entry=0 start
+    local -a words
     comm=${comm##*/}
     TA_AGENT_MATCH=
+    read -ra words <<<"${2,,}"
+    a0=${words[0]:-}
+    a0=${a0##*/}
+    # argv may omit the interpreter (comm node, args "/x/cli.js"): then the
+    # script is word 0.
+    start=1
+    case "$a0" in
+    node | nodejs | bun | deno | python | python3 | python3.*) ;;
+    *)
+        case "$comm" in
+        node | nodejs | bun | deno | python | python3 | python3.*)
+            a0=$comm
+            start=0
+            ;;
+        esac
+        ;;
+    esac
+    case "$a0" in
+    node | nodejs | bun | deno | python | python3 | python3.*)
+        for ((i = start; i < ${#words[@]}; i++)); do
+            w=${words[i]}
+            if [[ $w == -m ]]; then
+                script=${words[i + 1]:-}
+                break
+            fi
+            [[ $w == -* ]] && continue
+            [[ $a0 == deno && $w == run ]] && continue
+            script=$w
+            break
+        done
+        if [[ $script == */* ]]; then
+            dir=${script%/*}
+        fi
+        script=${script##*/}
+        case "$script" in
+        cli.js | cli.mjs | cli.cjs | index.js | index.mjs | index.cjs | \
+            main.js | main.mjs | main.cjs | entry.js | entry.mjs | entry.cjs)
+            entry=1
+            ;;
+        esac
+        ;;
+    esac
     for name in $TA_AGENT_NAMES; do
         case "$comm" in
         "$name" | "$name"-*)
@@ -202,10 +257,16 @@ _ta_agent_match() {
             return 0
             ;;
         esac
-        re="(^|[/[:space:]])$name([/:.[:space:]]|\$)"
-        if [[ $args =~ $re ]]; then
+        if [[ -n $a0 ]] && _ta_word_is "$a0" "$name"; then
             TA_AGENT_MATCH=$name
             return 0
+        fi
+        if [[ -n $script ]]; then
+            if _ta_word_is "$script" "$name" ||
+                { ((entry)) && [[ /$dir/ == */"$name"/* || /$dir/ == */"$name"-*/* ]]; }; then
+                TA_AGENT_MATCH=$name
+                return 0
+            fi
         fi
     done
     return 1

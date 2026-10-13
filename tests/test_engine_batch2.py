@@ -89,5 +89,39 @@ class AgentNameForkFreeTests(unittest.TestCase):
             self.assertEqual(r.stdout.split(), ["codex", "claude"])
 
 
+class AgentMatchArgvTests(unittest.TestCase):
+    def name_of(self, comm, args):
+        r = bash('ta_agent_name_of "$1" "$2" || echo none', comm, args)
+        return r.stdout.strip()
+
+    def test_incidental_mentions_are_not_agents(self):
+        for comm, args in [
+            ("nvim", "nvim CLAUDE.md"),
+            ("nvim", "nvim gemini.md"),
+            ("node", "node /home/u/.local/share/nvim/lazy/copilot.lua/"
+                     "copilot/js/language-server.js --stdio"),
+            ("less", "less /tmp/codex.txt"),
+            ("tail", "tail -f /var/log/amp.log"),
+            ("vim", "vim notes.txt"),
+            ("cat", "cat /etc/claude/config.json"),
+        ]:
+            self.assertEqual(self.name_of(comm, args), "none", args)
+
+    def test_real_agents_match(self):
+        for comm, args, want in [
+            ("claude", "claude --resume", "claude"),
+            ("node", "node /usr/bin/gemini --yolo", "gemini"),
+            ("node", "node /usr/lib/node_modules/@openai/codex/bin/codex.js",
+             "codex"),
+            ("python3", "python3 -m aider", "aider"),
+            ("bun", "bun /home/u/.bun/bin/opencode", "opencode"),
+            ("node", "node /usr/lib/node_modules/@anthropic-ai/claude-code/"
+                     "cli.js", "claude"),
+            ("node", "node /usr/lib/node_modules/@google/gemini-cli/dist/"
+                     "index.js", "gemini"),
+        ]:
+            self.assertEqual(self.name_of(comm, args), want, args)
+
+
 if __name__ == "__main__":
     unittest.main()
