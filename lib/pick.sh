@@ -131,30 +131,71 @@ pick_fzf_min() {
 }
 
 fzf_listen_start() {
-    # $1 fzf action the ticker POSTs every 2 s. Sets FZF_LISTEN_ARGS (for fzf's
-    # argv), FZF_LISTEN_TICKER (the ticker's pid) and exports FZF_API_KEY, a
-    # random key that stops other local users from driving fzf through the
-    # listen port (needs fzf 0.43). Without --listen or curl: empty, no ticker.
-    local action=$1 port
+    # $1 the fzf field holding a row's unique id (the pane id), then a command
+    # whose stdout is the row list. Sets FZF_LISTEN_ARGS (for fzf's argv),
+    # FZF_LISTEN_TICKER (the ticker's pid) and FZF_LISTEN_DIR.
+    # fzf 0.71+: --track --id-nth keep the cursor on the same agent when a
+    # reload reorders the rows (a plain reload keeps the same index, so the
+    # highlight would jump to another agent). Any reload needs it, the user's
+    # ctrl-l too, so it does not depend on the ticker.
+    # Ticker (fzf 0.71+ with --listen, and curl): every 2 s it runs the
+    # command into a snapshot file, then POSTs reload-sync(cat file). While
+    # fzf searches for the tracked row the UI blocks and drops keys, so the
+    # reload itself must be instant; the slow command runs here instead.
+    # Older fzf gets no ticker: an index-based reload every 2 s is the jump.
+    # It exports FZF_API_KEY, a random key that stops other local users from
+    # driving fzf through the listen port, and TA_LIVE_ROWS, which fzf's shell
+    # expands. Call fzf_listen_stop afterwards.
+    local idf=$1 port dir
+    shift
     declare -g -a FZF_LISTEN_ARGS=()
-    declare -g FZF_LISTEN_TICKER=''
-    pick_fzf_min 0.43 && fzf --help 2>/dev/null | grep -q -- '--listen' &&
+    declare -g FZF_LISTEN_TICKER='' FZF_LISTEN_DIR=''
+    pick_fzf_min 0.71 || return 0
+    FZF_LISTEN_ARGS=(--track "--id-nth=$idf")
+    fzf --help 2>/dev/null | grep -q -- '--listen' &&
         command -v curl >/dev/null 2>&1 || return 0
+    dir=$(mktemp -d "${TMPDIR:-/tmp}/ta-live.XXXXXX") || return 0
+    FZF_LISTEN_DIR=$dir
+    export TA_LIVE_ROWS=$dir/rows
     port=$((20000 + RANDOM % 20000))
     FZF_API_KEY=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
     export FZF_API_KEY
-    FZF_LISTEN_ARGS=("--listen=$port")
-    # The key goes to curl on stdin, not argv, where ps would show it.
-    (while sleep 2; do
-        printf 'header = "x-api-key: %s"\n' "$FZF_API_KEY" |
-            curl -s -K - -XPOST "localhost:$port" -d "$action" >/dev/null 2>&1 || break
-    done) &
+    FZF_LISTEN_ARGS+=("--listen=$port")
+    # sleep and the command run as jobs we wait on: bash runs the TERM trap
+    # at once when wait is interrupted, but would defer it behind a foreground
+    # child, and the ticker must die promptly without orphans.
+    (
+        kid=''
+        trap '[[ -z ${kid:-} ]] || kill "$kid" 2>/dev/null; exit 0' TERM
+        while :; do
+            sleep 2 &
+            kid=$!
+            wait "$kid"
+            "$@" >"$dir/rows.tmp" 2>/dev/null &
+            kid=$!
+            # No agents left exits non-zero; the empty list is the truth.
+            wait "$kid" || true
+            kid=''
+            mv -f "$dir/rows.tmp" "$dir/rows"
+            # The key goes to curl on stdin, not argv, where ps would show it.
+            # shellcheck disable=SC2016 # expanded by fzf's shell, not ours
+            printf 'header = "x-api-key: %s"\n' "$FZF_API_KEY" |
+                curl -s -m 2 -K - -XPOST "localhost:$port" \
+                    -d 'reload-sync(cat "$TA_LIVE_ROWS")' >/dev/null 2>&1 || break
+        done
+    ) &
     FZF_LISTEN_TICKER=$!
 }
 
 fzf_listen_stop() {
-    [[ -z ${FZF_LISTEN_TICKER:-} ]] || kill "$FZF_LISTEN_TICKER" 2>/dev/null || true
-    FZF_LISTEN_TICKER=''
+    # Safe to repeat and when nothing was started.
+    if [[ -n ${FZF_LISTEN_TICKER:-} ]]; then
+        kill "$FZF_LISTEN_TICKER" 2>/dev/null || true
+        wait "$FZF_LISTEN_TICKER" 2>/dev/null || true
+    fi
+    [[ -z ${FZF_LISTEN_DIR:-} ]] || rm -rf "$FZF_LISTEN_DIR"
+    FZF_LISTEN_TICKER='' FZF_LISTEN_DIR=''
+    unset TA_LIVE_ROWS
 }
 
 pick_cleanup() {
@@ -185,7 +226,7 @@ cmd_pick() {
     # plain key list.
     # shellcheck disable=SC2016 # expanded by fzf's shell, not ours
     pick_fzf_min 0.40 && th='+transform-header(cat "$TA_PICK_DIR/header")'
-    fzf_listen_start "$reload"
+    fzf_listen_start 2 "$SELF" pick-rows
     sel=$(fzf --ansi --reverse --header "$PICK_HEADER" ${FZF_LISTEN_ARGS[@]+"${FZF_LISTEN_ARGS[@]}"} \
         --delimiter=$'\t' --with-nth=1 \
         --bind "ctrl-y:execute-silent($SELF pick-action approve {2} {3} {4})$th+$reload" \

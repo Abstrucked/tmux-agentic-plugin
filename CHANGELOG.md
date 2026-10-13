@@ -25,6 +25,9 @@
 - Mirror panes retain their remote agent identity for seen tracking and urgent
   cycling, and are excluded from local agent detection. Looking at one mirror
   suppresses notifications only for that agent, rather than the whole host.
+- The picker and `mobile` keep the cursor on the same agent when the list
+  refreshes every 2 s, instead of jumping as rows reorder. Auto-refresh now
+  needs fzf 0.71 (older fzf: press ctrl-l / ctrl-r).
 
 ## 0.3.0 (2026-10-07)
 

@@ -153,16 +153,27 @@ class PickTests(unittest.TestCase):
         self.fzf()
         self.pick()
         self.assertTrue(any(a.startswith("--listen=") for a in self.argv()))
+        self.assertIn("--track", self.argv())
+        self.assertIn("--id-nth=2", self.argv())
         key = (self.dir / "apikey").read_text()
         self.assertRegex(key, r"^[0-9a-f]{32}$")
         self.assertNotIn(key, "\n".join(self.argv()))
 
     def test_no_listen_without_curl_support_or_new_enough_fzf(self):
         self.local("%1", "idle")
+        # fzf 0.71+ without --listen: cursor tracking stays, no ticker.
         self.fzf(help_text="--no-such-flag")
         self.pick()
         self.assertFalse(any(a.startswith("--listen") for a in self.argv()))
+        self.assertIn("--track", self.argv())
+        self.assertIn("--id-nth=2", self.argv())
         self.assertEqual((self.dir / "apikey").read_text(), "")
+        # 0.70: --listen exists, but index-based reloads are the bug.
+        self.fzf(version="0.70.0")
+        self.pick()
+        argv = self.argv()
+        self.assertFalse(any(a.startswith(("--listen", "--id-nth")) for a in argv))
+        self.assertNotIn("--track", argv)
         self.fzf(version="0.39.0")
         self.pick()
         self.assertFalse(any(a.startswith("--listen") for a in self.argv()))
@@ -266,42 +277,90 @@ class PickTests(unittest.TestCase):
         _, calls, _ = self.action("preview", f"{KEY}/%3", "claude")
         self.assertEqual(calls[0], f"detail --pane {KEY}/%3")
 
-    def listen(self, fzf_version, help_text):
-        """Run fzf_listen_start/stop; returns the shell's report and curl's argv log."""
+    def listen(self, fzf_version, help_text, curl=True, stop_early=False):
+        """Run fzf_listen_start/stop; returns the shell's report, curl's log and
+        the time fzf_listen_stop took."""
         self.fzf(version=fzf_version, help_text=help_text)
         curl_log = self.dir / "curl.log"
-        (self.fake / "curl").write_text(
-            f'#!/bin/sh\nprintf "%s\\n" "$*" >>{shlex.quote(str(curl_log))}\ncat >/dev/null\n')
-        script = (f'. "{ENGINE}"; . "{PICK}"; fzf_listen_start "reload(x)"; '
+        env_path = self.env["PATH"]
+        if curl:
+            # Logs argv, then the snapshot file as fzf's shell would read it
+            # at that moment.
+            (self.fake / "curl").write_text(
+                f'#!/bin/sh\nprintf "%s\\n" "$*" >>{shlex.quote(str(curl_log))}\n'
+                f'cat >/dev/null\ncat "$TA_LIVE_ROWS" >>{shlex.quote(str(curl_log))}\n')
+        else:
+            # A PATH with everything but curl (never a stripped-down PATH).
+            (self.fake / "curl").unlink()
+            nocurl = self.dir / "nocurl"
+            nocurl.mkdir()
+            for d in self.env["PATH"].split(os.pathsep):
+                for f in Path(d).glob("*") if Path(d).is_dir() else ():
+                    if f.name != "curl" and not (nocurl / f.name).exists():
+                        (nocurl / f.name).symlink_to(f)
+            env_path = f"{self.fake}{os.pathsep}{nocurl}"
+        wait = "sleep 0.3" if stop_early else "sleep 2.5"
+        script = (f'. "{ENGINE}"; . "{PICK}"; fzf_listen_start 2 printf "row\\t%%1\\n"; '
                   'echo "ARGS=${FZF_LISTEN_ARGS[*]}"; echo "N=${#FZF_LISTEN_ARGS[@]}"; echo "KEY=${FZF_API_KEY:-}"; '
-                  'echo "TICKER=$FZF_LISTEN_TICKER"; '
+                  'echo "TICKER=$FZF_LISTEN_TICKER"; echo "DIR=${FZF_LISTEN_DIR:-}"; '
                   '[ -z "$FZF_LISTEN_TICKER" ] || { kill -0 "$FZF_LISTEN_TICKER" && echo ALIVE; }; '
-                  'sleep 2.5; p=$FZF_LISTEN_TICKER; fzf_listen_stop; echo "AFTER=$FZF_LISTEN_TICKER"; '
+                  f'{wait}; p=$FZF_LISTEN_TICKER; t0=${{EPOCHREALTIME/./}}; fzf_listen_stop; '
+                  'echo "ELAPSED=$(( (${EPOCHREALTIME/./} - t0) / 1000 ))"; '
+                  'echo "AFTER=$FZF_LISTEN_TICKER"; echo "LIVE=${TA_LIVE_ROWS:-}"; fzf_listen_stop; '
                   '[ -z "$p" ] || { sleep 0.2; kill -0 "$p" 2>/dev/null && echo STILL || echo DEAD; }')
         r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                           env=self.env, timeout=20, stdin=subprocess.DEVNULL)
+                           env={**self.env, "TMPDIR": str(self.dir), "PATH": env_path}, timeout=20, stdin=subprocess.DEVNULL)
         self.assertEqual(r.returncode, 0, r.stderr)
         out = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
         return r.stdout, out, curl_log
 
     def test_fzf_listen_start_and_stop(self):
         stdout, out, curl_log = self.listen("0.74.4 (test)", "--listen")
-        self.assertRegex(out["ARGS"], r"^--listen=\d+$")
+        args = out["ARGS"].split()
+        self.assertEqual(args[:2], ["--track", "--id-nth=2"])
+        self.assertRegex(args[2], r"^--listen=\d+$")
+        self.assertEqual(len(args), 3)
         self.assertRegex(out["KEY"], r"^[0-9a-f]{32}$")
         self.assertIn("ALIVE", stdout)
         self.assertIn("DEAD", stdout)
         self.assertEqual(out["AFTER"], "")
+        self.assertEqual(out["LIVE"], "")
+        self.assertFalse(Path(out["DIR"]).exists())
         logged = curl_log.read_text()
         self.assertIn("-XPOST", logged)
+        self.assertIn("-m 2", logged)
         self.assertNotIn(out["KEY"], logged)
 
-    def test_fzf_listen_start_with_old_fzf_does_nothing(self):
-        stdout, out, curl_log = self.listen("0.39.0", "--listen")
-        self.assertEqual(out["ARGS"], "")
-        self.assertEqual(out["KEY"], "")
-        self.assertEqual(out["TICKER"], "")
-        self.assertNotIn("ALIVE", stdout)
-        self.assertFalse(curl_log.exists())
+    def test_ticker_posts_reload_sync_of_a_fresh_snapshot(self):
+        _, out, curl_log = self.listen("0.74.4 (test)", "--listen")
+        lines = curl_log.read_text().splitlines()
+        # The action is literal: fzf's shell expands $TA_LIVE_ROWS.
+        self.assertIn('-d reload-sync(cat "$TA_LIVE_ROWS")', lines[0])
+        self.assertEqual(lines[1], "row\t%1")
+
+    def test_stop_is_prompt_while_the_ticker_sleeps(self):
+        stdout, out, _ = self.listen("0.74.4 (test)", "--listen", stop_early=True)
+        self.assertLess(int(out["ELAPSED"]), 1000)
+        self.assertIn("DEAD", stdout)
+        self.assertFalse(Path(out["DIR"]).exists())
+
+    def test_fzf_listen_start_tracks_but_does_not_tick_without_listen_or_curl(self):
+        for kwargs in ({"help_text": "--no-such-flag"}, {"help_text": "--listen", "curl": False}):
+            stdout, out, _ = self.listen("0.74.4 (test)", **kwargs)
+            self.assertEqual(out["ARGS"], "--track --id-nth=2")
+            self.assertEqual(out["KEY"], "")
+            self.assertEqual(out["TICKER"], "")
+            self.assertEqual(out["DIR"], "")
+            self.assertNotIn("ALIVE", stdout)
+
+    def test_fzf_listen_start_before_0_71_does_nothing(self):
+        for version in ("0.70.0", "0.39.0"):
+            stdout, out, curl_log = self.listen(version, "--listen")
+            self.assertEqual(out["ARGS"], "")
+            self.assertEqual(out["KEY"], "")
+            self.assertEqual(out["TICKER"], "")
+            self.assertNotIn("ALIVE", stdout)
+            self.assertFalse(curl_log.exists())
 
     def test_ctrl_d_toggles_the_preview_between_pane_and_diff(self):
         _, calls, _ = self.action("preview", "%1", "claude")
