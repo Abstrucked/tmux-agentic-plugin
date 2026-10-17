@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (2026-10-13)
 
 - Remote discovery is gentler. Asking every tailnet peer is now opt-in:
   `@tmux-agent-remote-tailscale` defaults to `off`; set it to `on` to keep the
@@ -28,6 +28,11 @@
 - The picker and `mobile` keep the cursor on the same agent when the list
   refreshes every 2 s, instead of jumping as rows reorder. Auto-refresh now
   needs fzf 0.71 (older fzf: press ctrl-l / ctrl-r).
+- Agent detection no longer mistakes commands that merely mention an agent
+  for the agent itself, such as `nvim CLAUDE.md`, `less codex.txt`,
+  `tail -f amp.log` or the copilot.lua language server under nvim. Arguments
+  now count only for the program itself or, for node, bun, deno and python,
+  the script it runs (including npm's `<agent>/cli.js`-style entry files).
 
 ## 0.3.0 (2026-10-07)
 
