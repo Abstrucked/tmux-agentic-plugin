@@ -19,7 +19,7 @@ jobs:
       attestations: write
       artifact-metadata: write
       security-events: write
-    uses: hashgraph-online/hol-guard/.github/workflows/guarded-repository.yml@1cf26d4eea813b984f2b53324888e9f3d347acf9 # v3.27.1
+    uses: hashgraph-online/hol-guard/.github/workflows/guarded-repository.yml@e3f9e7eb4e0cc7b1987780a62697e8bb221ae050 # v3.49.0
     with:
       profile: strict-security
       fail_on_severity: high
